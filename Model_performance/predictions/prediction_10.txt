@@ -1,0 +1,30 @@
+# summary  
+the zap scan report for the target site, https://saucedemo.com, has 9 alerts with 3 medium and 2 low risk alerts. there are no high or informational alerts. no false positives were found.
+
+# key findings
+
+## content security policy (csp) header not set  
+risk level: medium  
+description: the website lacks a content security policy (csp) header, which is an added layer of security that helps to detect and mitigate certain types of attacks, including cross site scripting (xss) and data injection attacks.  
+instances: 1
+
+## cross-domain misconfiguration  
+risk level: medium  
+description: web browser data loading may be possible due to a cross origin resource sharing (cors) misconfiguration on the web server.  
+instances: 1
+
+## missing anti-clickjacking header  
+risk level: medium  
+description: the response does not protect against 'clickjacking' attacks. it should include either content-security-policy with 'frame-ancestors' directive or x-frame-options.  
+instances: 1
+
+# remediation steps
+
+## content security policy (csp) header not set  
+to address this vulnerability, the website owner should add a content security policy (csp) header. this can be done by adding the appropriate csp header in the website's server-side code or configuration.
+
+## cross-domain misconfiguration  
+to address this vulnerability, the website owner should review the cross origin resource sharing (cors) configuration on the web server and ensure it is properly configured to prevent unauthorized access to sensitive data.
+
+## missing anti-clickjacking header  
+to address this vulnerability, the website owner should add an anti-clickjacking header to the website's responses. this can be done by adding either the content-security-policy header with the 'frame-ancestors' directive or the x-frame-options header to the website's server-side code or configuration.

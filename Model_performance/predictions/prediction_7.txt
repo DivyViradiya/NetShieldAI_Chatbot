@@ -1,0 +1,9 @@
+the report presents several key findings:
+
+1. early and ongoing verification of design assumptions is crucial to prevent insecure design flaws.  
+2. comprehensive testing of security controls is necessary to ensure they function as intended.  
+3. documentation is important to track design decisions and ensure that security controls are properly implemented and maintained.  
+4. injection vulnerabilities are complex and diverse, with 33 different cwes mapped to them, necessitating broad and layered mitigation strategies.  
+5. vulnerabilities related to cryptographic failures are highly exploitable, with an average weighted exploit score of 7.29.
+
+the security score of 32/100 was given based on the combined severity of the identified vulnerabilities and the potential impact of exploitation. it is a low score, indicating a high level of risk and urgency to address these security issues.

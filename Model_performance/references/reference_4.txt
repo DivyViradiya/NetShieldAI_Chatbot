@@ -1,0 +1,13 @@
+remediation steps from the sslscan report:
+
+1. disable tls fallback scsv: since tls fallback scsv may allow downgrade attacks, it is recommended to disable it in the server configuration. this helps ensure that clients use only secure versions of the protocol.
+
+2. review and remove weak ciphers: weak ciphers present in the server's configuration can be exploited by attackers. to enhance security, the server should be updated to allow only strong, modern ciphers.
+
+3. enable tlsv1.3: the sslscan report shows that tlsv1.3 is disabled. enabling tlsv1.3 improves encryption strength and supports modern security practices. ensure clients can connect using this version.
+
+4. update ssl/tls configuration regularly: security standards evolve, so it's important to keep the ssl/tls settings current. this includes using updated protocols, secure ciphers, and reliable key exchange methods.
+
+5. manage ssl certificate properly: although the ssl certificate has strong encryption, its management must be secure. regularly check expiration, replace compromised certificates, and store private keys securely.
+
+6. meet compliance requirements: check if the current ssl/tls setup adheres to regulatory standards. adjust configurations to match any requirements on protocols, ciphers, or key sizes, and keep them updated.

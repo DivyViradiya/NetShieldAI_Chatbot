@@ -1,0 +1,346 @@
+{
+  "scan_metadata": {
+    "tool": "Mobile Security Framework (MobSF)",
+    "report_id": "bd5c065a-624e-4997-b331-67c6b630ee92",
+    "scan_date": "April 19, 2025, 7:05 AM",
+    "mobsf_version": "4.3.1",
+    "app_security_score": "67/100",
+    "grade": "A",
+    "file_name": "bitbar-ios-sample.ipa",
+    "identifier": "com.bitbar.testdroid.BitbarIOSSample"
+  },
+  "summary": {
+    "findings_severity": {
+      "High": 0,
+      "Medium": 3,
+      "Info": 0,
+      "Secure": 1,
+      "Hotspot": 0
+    },
+    "total_issues": 4
+  },
+  "file_information": {
+    "File Name": "bitbar-ios-sample.ipa",
+    "Size": "0.14MB",
+    "MD5": "e1f08f17e868e9de32a87d0bdc522fac",
+    "SHA1": "deca43e3dd1186d002dea64b4cef4c8b88142488",
+    "SHA256": "07ff7a6608265fff57bd3369fb4e10321d939de5101bd966677cd9a210b820b1"
+  },
+  "app_information": {
+    "Identifier": "com.bitbar.testdroid.BitbarIOSSample",
+    "App Name": "BitbarIOSSample",
+    "App Type": "Objective C",
+    "SDK Name": "iphoneos9.1",
+    "Version": "1.0",
+    "Build": "1.0",
+    "Platform Version": "9.1",
+    "Min OS Version": "6.0",
+    "Supported Platforms": [
+      "iPhoneOS"
+    ]
+  },
+  "binary_information": {
+    "Arch": "ARM",
+    "Sub Arch": "CPU_SUBTYPE_ARM_V7",
+    "Bit": "32-bit",
+    "Endian": "<"
+  },
+  "app_transport_security_findings": [],
+  "ipa_binary_code_analysis_findings": [
+    {
+      "number": 1,
+      "issue": "Binary makes use of insecure API(s)",
+      "severity": "warning",
+      "standards": {
+        "CWE": "CWE-676: Use of Potentially Dangerous Function",
+        "OWASP Top 10": "M7: Client Code Quality",
+        "OWASP MASVS": "MSTG-CODE-8"
+      },
+      "description": "The binary may contain the following insecure API(s) _memcpy , _strlen"
+    },
+    {
+      "number": 2,
+      "issue": "Binary makes use of malloc function",
+      "severity": "warning",
+      "standards": {
+        "CWE": "CWE-789: Uncontrolled Memory Allocation",
+        "OWASP Top 10": "M7: Client Code Quality",
+        "OWASP MASVS": "MSTG-CODE-8"
+      },
+      "description": "The binary may use _malloc function instead of calloc \uf2a1"
+    }
+  ],
+  "ipa_binary_analysis_findings": [
+    {
+      "protection": "NX",
+      "status": false,
+      "severity": "info",
+      "description": "The binary does not have NX bit set. NX bit offer protection against exploitation of memory corruption vulnerabilities by marking memory page as non-executable. However iOS never allows an app to execute from writeable memory. You do not need to specifically enable the \u2018NX bit\u2019 because it\u2019s always enabled for all third- party code."
+    },
+    {
+      "protection": "PIE",
+      "status": true,
+      "severity": "info",
+      "description": "The binary is build with -fPIC flag which enables Position independent code. This makes Return Oriented Programming (ROP) attacks much more difficult to execute reliably. STACK CANARY True info This binary has a stack canary value added to the stack so that it will be overwritten by a stack buffer that overflows the return address. This allows detection of overflows by verifying the integrity of the canary before function return. ARC"
+    },
+    {
+      "protection": "False\nwarning\nThis binary has debug symbols stripped. We cannot identify whether ARC is enabled or not.\nRPATH",
+      "status": false,
+      "severity": "info",
+      "description": "The binary does not have Runpath Search Path (@rpath) set. CODE"
+    },
+    {
+      "protection": "SIGNATURE",
+      "status": true,
+      "severity": "info",
+      "description": "This binary has a code signature. ENCRYPTED"
+    },
+    {
+      "protection": "False\nwarning\nThis binary is not encrypted.\nSYMBOLS\nSTRIPPED",
+      "status": true,
+      "severity": "info",
+      "description": "Debug Symbols are stripped \uf121"
+    }
+  ],
+  "code_analysis_findings": [],
+  "ofac_sanctioned_countries": [],
+  "domain_malware_check": [
+    {
+      "domain": "www.apple.com",
+      "status": "ok",
+      "geolocation": {}
+    },
+    {
+      "domain": "IP: \n23.201.200.214 \nCountry: \nCountry: \nIndia \nRegion: \nRegion: \nMaharashtra \nCity: \nCity: \nMumbai \nLatitude: \nLatitude: \n19.014410 \nLongitude: \nLongitude: \n72.847939 \nView: \nView: \nGoogle Map\ndeveloper.apple.com",
+      "status": "ok",
+      "geolocation": {}
+    }
+  ],
+  "scan_logs": [
+    {
+      "timestamp": "2025-04-19",
+      "event": "07:05:58",
+      "error": "iOS Binary (IPA) Analysis Started"
+    },
+    {
+      "timestamp": "OK",
+      "event": "2025-04-19",
+      "error": "07:05:58"
+    },
+    {
+      "timestamp": "Generating",
+      "event": "Hashes",
+      "error": "OK"
+    },
+    {
+      "timestamp": "2025-04-19",
+      "event": "07:05:58",
+      "error": "Extracting IPA"
+    },
+    {
+      "timestamp": "OK",
+      "event": "2025-04-19",
+      "error": "07:05:58"
+    },
+    {
+      "timestamp": "Unzipping",
+      "event": "OK",
+      "error": "2025-04-19 07:05:58"
+    },
+    {
+      "timestamp": "iOS",
+      "event": "File",
+      "error": "Analysis and Normalization"
+    },
+    {
+      "timestamp": "OK",
+      "event": "2025-04-19",
+      "error": "07:05:59"
+    },
+    {
+      "timestamp": "iOS",
+      "event": "Info.plist",
+      "error": "Analysis Started"
+    },
+    {
+      "timestamp": "OK",
+      "event": "2025-04-19",
+      "error": "07:05:59"
+    },
+    {
+      "timestamp": "Finding",
+      "event": "Info.plist",
+      "error": "in iOS Binary"
+    },
+    {
+      "timestamp": "OK",
+      "event": "2025-04-19",
+      "error": "07:05:59"
+    },
+    {
+      "timestamp": "Fetching",
+      "event": "Details",
+      "error": "from App Store: com.bitbar.testdroid.BitbarIOSSample"
+    },
+    {
+      "timestamp": "OK",
+      "event": "2025-04-19",
+      "error": "07:05:59"
+    },
+    {
+      "timestamp": "Searching",
+      "event": "for",
+      "error": "secrets in plist files"
+    },
+    {
+      "timestamp": "OK",
+      "event": "2025-04-19",
+      "error": "07:05:59"
+    },
+    {
+      "timestamp": "Starting",
+      "event": "Binary",
+      "error": "Analysis"
+    },
+    {
+      "timestamp": "OK",
+      "event": "2025-04-19",
+      "error": "07:05:59"
+    },
+    {
+      "timestamp": "Dumping",
+      "event": "Classes",
+      "error": "from the binary"
+    },
+    {
+      "timestamp": "OK",
+      "event": "2025-04-19",
+      "error": "07:05:59"
+    },
+    {
+      "timestamp": "Running",
+      "event": "jtool",
+      "error": "against the binary for dumping classes"
+    },
+    {
+      "timestamp": "OK",
+      "event": "2025-04-19",
+      "error": "07:05:59"
+    },
+    {
+      "timestamp": "Library",
+      "event": "Binary",
+      "error": "Analysis Started"
+    },
+    {
+      "timestamp": "OK",
+      "event": "2025-04-19",
+      "error": "07:05:59"
+    },
+    {
+      "timestamp": "Framework",
+      "event": "Binary",
+      "error": "Analysis Started"
+    },
+    {
+      "timestamp": "OK",
+      "event": "2025-04-19",
+      "error": "07:05:59"
+    },
+    {
+      "timestamp": "Extracting",
+      "event": "String",
+      "error": "Metadata"
+    },
+    {
+      "timestamp": "OK",
+      "event": "2025-04-19",
+      "error": "07:05:59"
+    },
+    {
+      "timestamp": "Extracting",
+      "event": "URL",
+      "error": "and Email from IPA"
+    },
+    {
+      "timestamp": "OK",
+      "event": "2025-04-19",
+      "error": "07:05:59"
+    },
+    {
+      "timestamp": "Performing",
+      "event": "Malware",
+      "error": "check on extracted domains"
+    },
+    {
+      "timestamp": "OK",
+      "event": "2025-04-19",
+      "error": "07:06:00"
+    },
+    {
+      "timestamp": "Fetching",
+      "event": "IPA",
+      "error": "icon path"
+    },
+    {
+      "timestamp": "OK",
+      "event": "2025-04-19",
+      "error": "07:06:02"
+    },
+    {
+      "timestamp": "Updating",
+      "event": "Trackers",
+      "error": "Database...."
+    },
+    {
+      "timestamp": "OK",
+      "event": "2025-04-19",
+      "error": "07:06:02"
+    },
+    {
+      "timestamp": "Detecting",
+      "event": "Trackers",
+      "error": "from Domains"
+    },
+    {
+      "timestamp": "OK",
+      "event": "2025-04-19",
+      "error": "07:06:02"
+    },
+    {
+      "timestamp": "Saving",
+      "event": "to",
+      "error": "Database"
+    },
+    {
+      "timestamp": "OK",
+      "event": "Report",
+      "error": "Generated by - MobSF v4.3.1"
+    },
+    {
+      "timestamp": "Mobile",
+      "event": "Security",
+      "error": "Framework (MobSF) is an automated, all-in-one mobile application (Android/iOS/Windows) pen-testing, malware analysis and security assessment"
+    },
+    {
+      "timestamp": "framework",
+      "event": "capable",
+      "error": "of performing static and dynamic analysis."
+    },
+    {
+      "timestamp": "\u00a9",
+      "event": "2025",
+      "error": "Mobile Security Framework - MobSF |"
+    },
+    {
+      "timestamp": "Ajin",
+      "event": "Abraham",
+      "error": "|"
+    }
+  ],
+  "file_metadata": {
+    "filename": "1_mobsf_bitbar-ios-sample_20250419_123603.pdf",
+    "file_size": 598019,
+    "last_modified": "2025-06-10T12:10:52.115381"
+  }
+}

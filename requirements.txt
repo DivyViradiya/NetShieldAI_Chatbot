@@ -1,0 +1,11 @@
+﻿uvicorn
+python-dotenv
+transformers
+sentence-transformers
+pinecone
+pypdf2
+langchain
+fastapi
+huggingface_hub
+python-multipart
+llama_cpp

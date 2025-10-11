@@ -1,0 +1,18 @@
+the zap scan report for https://saucedemo.com identified 9 alerts, including 3 medium-risk and 2 low-risk issues. no high-risk or informational alerts were detected, and no false positives were found.
+
+key findings:
+
+1. content security policy (csp) header is not set  
+the website does not implement a csp header, which could help prevent cross-site scripting (xss) and injection attacks by restricting resource loading policies
+
+2. cross-domain misconfiguration  
+the server has a cors configuration that may allow unauthorized cross-origin data access, potentially exposing sensitive information to untrusted domains
+
+3. missing anti-clickjacking header  
+the response lacks headers to defend against clickjacking. neither x-frame-options nor a csp with frame-ancestors directive is set
+
+remediation steps:
+
+1. implement a proper content-security-policy header to restrict resources and mitigate xss and injection risks  
+2. review and secure the cors configuration to limit resource access to trusted domains only  
+3. add either the x-frame-options header or content-security-policy with frame-ancestors directive to protect against clickjacking attacks

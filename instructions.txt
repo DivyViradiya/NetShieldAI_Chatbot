@@ -1,0 +1,7 @@
+Instructions to run the app:
+
+Command to run the app:
+uvicorn app:app --host 0.0.0.0 --port 5000 
+
+To access the app on this machine:
+http://45.119.14.140:5000/

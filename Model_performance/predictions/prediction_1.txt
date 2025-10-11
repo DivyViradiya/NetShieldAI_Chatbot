@@ -1,0 +1,23 @@
+the sslscan report provides an overview of the ssl/tls configuration for the target host with the connected ip 137.74.187.103. the report highlights that tlsv1.0 and tlsv1.1 are disabled, while tlsv1.2 is enabled. tlsv1.3 is currently disabled. the server supports tls fallback scsv, does not support session renegotiation, and compression is disabled. the server supports multiple ciphers with preferred e and a ciphers for tlsv1.2. the ssl certificate details include the subject, issuer, signature algorithm, rsa key strength, and alternative names. the certificate is valid from march 25, 2025, until march 25, 2026.
+
+key findings
+
+1. tlsv1.0 and tlsv1.1 are disabled, indicating that the server is not vulnerable to the heartbleed vulnerability.
+2. tlsv1.2 is enabled, providing a secure protocol for secure communication.
+3. the server supports tls fallback scsv, which can potentially allow downgrade attacks.
+4. compression is disabled, which is a positive security measure as it can be exploited in some attacks.
+5. the server supports multiple ciphers, including both preferred and accepted ciphers for tlsv1.2.
+6. the ssl certificate is valid and has a key strength of 4096 bits, indicating a strong encryption.
+
+implications
+
+1. the support for tls fallback scsv can potentially allow downgrade attacks if an attacker tricks the client into connecting over an insecure protocol version.
+2. the server is not vulnerable to the heartbleed vulnerability, which is a positive security measure.
+3. the server supports weak ciphers, which can potentially allow attacks if an attacker manages to exploit them.
+4. the ssl certificate is valid and has a strong encryption, indicating that the server has proper authentication and encryption in place.
+
+remediation steps
+
+1. disable tls fallback scsv to prevent downgrade attacks.
+2. review and remove any weak ciphers from the server configuration to strengthen security.
+3. ensure that the server supports only up-to-date and secure protocols, such as tlsv1.2 and tlsv1.3, to prevent exploitation of older, less secure protocols.

@@ -1,0 +1,13 @@
+key findings
+
+1. disabling of tlsv1.0 and tlsv1.1: the sslscan report confirms that tlsv1.0 and tlsv1.1 are disabled, which helps prevent vulnerabilities like heartbleed. turning off these older protocols is a good security practice and can stop downgrade attacks where insecure versions are forced during communication.
+
+2. enabled tlsv1.2: tlsv1.2 is active on the target host, as shown in the sslscan report. this version offers secure and modern encryption and is preferred over older versions due to improved security features and better protection.
+
+3. support for tls fallback scsv: the server supports tls fallback scsv, a feature intended to block forced protocol downgrades. however, this can still be abused if attackers trick the client. disabling this feature is recommended to prevent such downgrade attacks.
+
+4. disabled compression: the server has disabled compression, which is a strong security measure. enabling compression can make systems vulnerable to attacks like crime, which extract sensitive information. turning it off reduces such risks.
+
+5. support for multiple ciphers: the report shows that the server supports various ciphers for tlsv1.2, including both preferred and accepted ones. while this allows flexibility, some ciphers may be weak and exploitable. administrators should review and remove any weak ciphers to enhance security.
+
+6. valid ssl certificate: the ssl certificate used by the server is valid and uses a 4096-bit rsa key. this confirms the presence of strong encryption and proper server authentication, helping protect communication between client and server.

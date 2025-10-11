@@ -1,0 +1,535 @@
+{
+  "scan_metadata": {
+    "tool": "Mobile Security Framework (MobSF)",
+    "report_id": "cc9065b0-4c38-4f4d-9a3e-4b2d1c5bcbf6",
+    "scan_date": "April 19, 2025, 7:06 AM",
+    "mobsf_version": "4.3.1",
+    "app_security_score": "32/100",
+    "grade": "C",
+    "file_name": "bitbar-sample-app.apk",
+    "package_name": "com.bitbar.testdroid"
+  },
+  "summary": {
+    "findings_severity": {
+      "High": 5,
+      "Medium": 4,
+      "Info": 0,
+      "Secure": 1,
+      "Hotspot": 1
+    },
+    "total_issues": 11
+  },
+  "file_information": {
+    "File Name": "bitbar-sample-app.apk",
+    "Size": "0.11MB",
+    "MD5": "00cc5435151aa38a091781922c0390a4",
+    "SHA1": "40e991508120d6f5d653a6755d8209df4d20289d",
+    "SHA256": "3b4d462b8cce5f377a33417e1be7680717065f280a9f6e2f6af49325dbe89411"
+  },
+  "app_information": {
+    "Package Name": "com.bitbar.testdroid",
+    "App Name": "App Name:",
+    "Main Activity": "Main Activity:",
+    "Target SDK": 33,
+    "Min SDK": 4,
+    "Max SDK": "Max SDK:",
+    "Android Version Name": "Android Version Name:",
+    "Android Version Code": 1
+  },
+  "app_components": {
+    "Activities": 3,
+    "Services": 0,
+    "Receivers": 0,
+    "Providers": 0,
+    "Exported Activities": 2,
+    "Exported Services": 0,
+    "Exported Receivers": 0,
+    "Exported Providers": 0
+  },
+  "certificate_information": {
+    "Binary is signed": true,
+    "v1 signature": true,
+    "v2 signature": true,
+    "v3 signature": false,
+    "v4 signature": false,
+    "X.509 Subject": "CN=Android Debug, O=Android, C=US",
+    "Signature Algorithm": "rsassa_pkcs1v15",
+    "Valid From": "2022-07-05 09:35:34+00:00",
+    "Valid To": "2052-06-27 09:35:34+00:00",
+    "Issuer": "CN=Android Debug, O=Android, C=US",
+    "Serial Number": "0x1",
+    "Hash Algorithm": "sha1",
+    "md5_fingerprint": "f5e77c7ea1c2102188be9eae9a3b8573",
+    "sha1_fingerprint": "a7ce1335a1bbb135d34c208b51945cc93104c7ed",
+    "sha256_fingerprint": "93424fddcac08ed772ccaf7a20cd2cda4fc83f101656536154ef92846c2f3ffc",
+    "sha512_fingerprint": "ec768feee2bcc63bdd65c642767b717a8cf0b855772497c302a4e0109c44f544a40338e9164be8053011f575a7e0a6196e08e9cca78a1589510a0820e4b4bd93",
+    "PublicKey Algorithm": "rsa",
+    "Bit Size": 2048,
+    "Fingerprint": "ff557fc6f6139b576a27f7f3cb4efe09a12090029a11ab150eaddf7c79d6ec67",
+    "Found Unique Certificates": 1
+  },
+  "application_permissions": [
+    {
+      "permission": "android.permission.WRITE_EXTERNAL_STORAGE",
+      "status": "dangerous",
+      "info": "read/modify/delete external storage contents",
+      "description": "Allows an application to write to external storage."
+    },
+    {
+      "permission": "android.permission.INTERNET",
+      "status": "normal",
+      "info": "full Internet access",
+      "description": "Allows an application to create network sockets. \uf577"
+    }
+  ],
+  "apkid_analysis": [
+    {
+      "finding": "Compiler",
+      "details": "r8 without marker (suspicious)"
+    }
+  ],
+  "network_security_findings": [],
+  "certificate_analysis_findings": [
+    {
+      "title": "Signed Application",
+      "severity": "info",
+      "description": "Application is signed with a code signing certificate"
+    },
+    {
+      "title": "Application vulnerable to Janus Vulnerability",
+      "severity": "warning",
+      "description": "Application is signed with v1 signature scheme, making it vulnerable to Janus vulnerability on Android 5.0-8.0, if signed"
+    },
+    {
+      "title": "only with v1 signature scheme. Applications running on Android 5.0-7.0 signed with v1, and v2/v3 scheme is also vulnerable. Application signed with debug certificate",
+      "severity": "high",
+      "description": "Application signed with a debug certificate. Production application must not be shipped with a debug certificate."
+    },
+    {
+      "title": "Certificate algorithm vulnerable to hash collision",
+      "severity": "high",
+      "description": "Application is signed with SHA1withRSA. SHA1 hash algorithm is known to have collision issues. \uf002"
+    }
+  ],
+  "manifest_analysis_findings": [
+    {
+      "number": 1,
+      "issue": "App can be installed on a vulnerable upatched Android version Android 1.6, [minSdk=4]",
+      "severity": "high",
+      "description": "This application can be installed on an older version of android that has multiple unfixed vulnerabilities. These devices won't receive reasonable security updates from Google. Support an Android version => 10, API 29 to receive reasonable security updates."
+    },
+    {
+      "number": 2,
+      "issue": "Debug Enabled For App [android:debuggable=true]",
+      "severity": "high",
+      "description": "Debugging was enabled on the app which makes it easier for reverse engineers to hook a debugger to it. This allows dumping a stack trace and accessing debugging helper classes."
+    },
+    {
+      "number": 3,
+      "issue": "Application Data can be Backed up [android:allowBackup] flag is missing.",
+      "severity": "warning",
+      "description": "The flag [android:allowBackup] should be set to false. By default it is set to true and allows anyone to backup your application data via adb. It allows users who have enabled USB debugging to copy application data off of the device."
+    },
+    {
+      "number": 4,
+      "issue": "Activity (com.bitbar.testdroid.CorrectAnswerActivity) is not Protected. [android:exported=true]",
+      "severity": "warning",
+      "description": "An Activity is found to be shared with other apps on the device therefore leaving it accessible to any other application on the device."
+    },
+    {
+      "number": 5,
+      "issue": "Activity (com.bitbar.testdroid.WrongAnswerActivity) is not Protected. [android:exported=true]",
+      "severity": "warning",
+      "description": "An Activity is found to be shared with other apps on the device therefore leaving it accessible to any other application on the device. NO NO ISSUE ISSUE SEVERITY SEVERITY DESCRIPTION DESCRIPTION \uf121"
+    }
+  ],
+  "code_analysis_findings": [
+    {
+      "number": 1,
+      "issue": "Debug configuration enabled. Production builds must not be debuggable.",
+      "severity": "high",
+      "standards": "CWE: CWE-919: Weaknesses in Mobile Applications OWASP Top 10: M1: Improper Platform Usage OWASP MASVS: MSTG-RESILIENCE-2",
+      "files": "com/bitbar/testdroid/BuildConfig.java \uf2c1"
+    }
+  ],
+  "niap_analysis": [],
+  "abused_permissions_summary": {
+    "Malware Permissions": {
+      "matches": "2/25",
+      "permissions": [
+        "android.permission.WRITE_EXTERNAL_STORAGE",
+        "android.permission.INTERNET"
+      ],
+      "description": "Top permissions that are widely abused by known malware."
+    },
+    "Other Common Permissions": {
+      "matches": "0/44",
+      "permissions": [
+        "Malware Permissions:"
+      ],
+      "description": "Permissions that are commonly abused by known malware."
+    }
+  },
+  "scan_logs": [
+    {
+      "timestamp": "2025-04-19",
+      "event": "07:06:19",
+      "error": "Generating Hashes"
+    },
+    {
+      "timestamp": "OK",
+      "event": "2025-04-19",
+      "error": "07:06:19"
+    },
+    {
+      "timestamp": "Extracting",
+      "event": "APK",
+      "error": "OK"
+    },
+    {
+      "timestamp": "2025-04-19",
+      "event": "07:06:19",
+      "error": "Unzipping"
+    },
+    {
+      "timestamp": "OK",
+      "event": "2025-04-19",
+      "error": "07:06:19"
+    },
+    {
+      "timestamp": "Parsing",
+      "event": "APK",
+      "error": "with androguard"
+    },
+    {
+      "timestamp": "OK",
+      "event": "2025-04-19",
+      "error": "07:06:19"
+    },
+    {
+      "timestamp": "Extracting",
+      "event": "APK",
+      "error": "features using aapt/aapt2"
+    },
+    {
+      "timestamp": "OK",
+      "event": "2025-04-19",
+      "error": "07:06:19"
+    },
+    {
+      "timestamp": "Getting",
+      "event": "Hardcoded",
+      "error": "Certificates/Keystores"
+    },
+    {
+      "timestamp": "OK",
+      "event": "2025-04-19",
+      "error": "07:06:20"
+    },
+    {
+      "timestamp": "Parsing",
+      "event": "AndroidManifest.xml",
+      "error": "OK"
+    },
+    {
+      "timestamp": "2025-04-19",
+      "event": "07:06:20",
+      "error": "Extracting Manifest Data"
+    },
+    {
+      "timestamp": "OK",
+      "event": "2025-04-19",
+      "error": "07:06:20"
+    },
+    {
+      "timestamp": "Manifest",
+      "event": "Analysis",
+      "error": "Started"
+    },
+    {
+      "timestamp": "OK",
+      "event": "2025-04-19",
+      "error": "07:06:20"
+    },
+    {
+      "timestamp": "Performing",
+      "event": "Static",
+      "error": "Analysis on: BitbarSampleApp (com.bitbar.testdroid)"
+    },
+    {
+      "timestamp": "OK",
+      "event": "2025-04-19",
+      "error": "07:06:20"
+    },
+    {
+      "timestamp": "Fetching",
+      "event": "Details",
+      "error": "from Play Store: com.bitbar.testdroid"
+    },
+    {
+      "timestamp": "OK",
+      "event": "2025-04-19",
+      "error": "07:06:20"
+    },
+    {
+      "timestamp": "Checking",
+      "event": "for",
+      "error": "Malware Permissions"
+    },
+    {
+      "timestamp": "OK",
+      "event": "2025-04-19",
+      "error": "07:06:20"
+    },
+    {
+      "timestamp": "Fetching",
+      "event": "icon",
+      "error": "path"
+    },
+    {
+      "timestamp": "OK",
+      "event": "2025-04-19",
+      "error": "07:06:20"
+    },
+    {
+      "timestamp": "Library",
+      "event": "Binary",
+      "error": "Analysis Started"
+    },
+    {
+      "timestamp": "OK",
+      "event": "2025-04-19",
+      "error": "07:06:20"
+    },
+    {
+      "timestamp": "Reading",
+      "event": "Code",
+      "error": "Signing Certificate"
+    },
+    {
+      "timestamp": "OK",
+      "event": "2025-04-19",
+      "error": "07:06:20"
+    },
+    {
+      "timestamp": "Running",
+      "event": "APKiD",
+      "error": "2.1.5"
+    },
+    {
+      "timestamp": "OK",
+      "event": "2025-04-19",
+      "error": "07:06:22"
+    },
+    {
+      "timestamp": "Detecting",
+      "event": "Trackers",
+      "error": "OK"
+    },
+    {
+      "timestamp": "2025-04-19",
+      "event": "07:06:22",
+      "error": "Decompiling APK to Java with JADX"
+    },
+    {
+      "timestamp": "OK",
+      "event": "2025-04-19",
+      "error": "07:06:23"
+    },
+    {
+      "timestamp": "Converting",
+      "event": "DEX",
+      "error": "to Smali"
+    },
+    {
+      "timestamp": "OK",
+      "event": "2025-04-19",
+      "error": "07:06:23"
+    },
+    {
+      "timestamp": "Code",
+      "event": "Analysis",
+      "error": "Started on - java_source"
+    },
+    {
+      "timestamp": "OK",
+      "event": "2025-04-19",
+      "error": "07:06:23"
+    },
+    {
+      "timestamp": "Android",
+      "event": "SBOM",
+      "error": "Analysis Completed"
+    },
+    {
+      "timestamp": "OK",
+      "event": "2025-04-19",
+      "error": "07:06:23"
+    },
+    {
+      "timestamp": "Android",
+      "event": "SAST",
+      "error": "Completed"
+    },
+    {
+      "timestamp": "OK",
+      "event": "2025-04-19",
+      "error": "07:06:23"
+    },
+    {
+      "timestamp": "Android",
+      "event": "API",
+      "error": "Analysis Started"
+    },
+    {
+      "timestamp": "OK",
+      "event": "2025-04-19",
+      "error": "07:06:23"
+    },
+    {
+      "timestamp": "Android",
+      "event": "API",
+      "error": "Analysis Completed"
+    },
+    {
+      "timestamp": "OK",
+      "event": "2025-04-19",
+      "error": "07:06:23"
+    },
+    {
+      "timestamp": "Android",
+      "event": "Permission",
+      "error": "Mapping Started"
+    },
+    {
+      "timestamp": "OK",
+      "event": "2025-04-19",
+      "error": "07:06:23"
+    },
+    {
+      "timestamp": "Android",
+      "event": "Permission",
+      "error": "Mapping Completed"
+    },
+    {
+      "timestamp": "OK",
+      "event": "2025-04-19",
+      "error": "07:06:23"
+    },
+    {
+      "timestamp": "Android",
+      "event": "Behaviour",
+      "error": "Analysis Started"
+    },
+    {
+      "timestamp": "OK",
+      "event": "2025-04-19",
+      "error": "07:06:24"
+    },
+    {
+      "timestamp": "Android",
+      "event": "Behaviour",
+      "error": "Analysis Completed"
+    },
+    {
+      "timestamp": "OK",
+      "event": "2025-04-19",
+      "error": "07:06:24"
+    },
+    {
+      "timestamp": "Extracting",
+      "event": "Emails",
+      "error": "and URLs from Source Code"
+    },
+    {
+      "timestamp": "OK",
+      "event": "2025-04-19",
+      "error": "07:06:24"
+    },
+    {
+      "timestamp": "Email",
+      "event": "and",
+      "error": "URL Extraction Completed"
+    },
+    {
+      "timestamp": "OK",
+      "event": "2025-04-19",
+      "error": "07:06:24"
+    },
+    {
+      "timestamp": "Extracting",
+      "event": "String",
+      "error": "data from APK"
+    },
+    {
+      "timestamp": "OK",
+      "event": "2025-04-19",
+      "error": "07:06:24"
+    },
+    {
+      "timestamp": "Extracting",
+      "event": "String",
+      "error": "data from Code"
+    },
+    {
+      "timestamp": "OK",
+      "event": "2025-04-19",
+      "error": "07:06:24"
+    },
+    {
+      "timestamp": "Extracting",
+      "event": "String",
+      "error": "values and entropies from Code"
+    },
+    {
+      "timestamp": "OK",
+      "event": "2025-04-19",
+      "error": "07:06:24"
+    },
+    {
+      "timestamp": "Performing",
+      "event": "Malware",
+      "error": "check on extracted domains"
+    },
+    {
+      "timestamp": "OK",
+      "event": "2025-04-19",
+      "error": "07:06:24"
+    },
+    {
+      "timestamp": "Saving",
+      "event": "to",
+      "error": "Database"
+    },
+    {
+      "timestamp": "OK",
+      "event": "Report",
+      "error": "Generated by - MobSF v4.3.1"
+    },
+    {
+      "timestamp": "Mobile",
+      "event": "Security",
+      "error": "Framework (MobSF) is an automated, all-in-one mobile application (Android/iOS/Windows) pen-testing, malware analysis and security assessment"
+    },
+    {
+      "timestamp": "framework",
+      "event": "capable",
+      "error": "of performing static and dynamic analysis."
+    },
+    {
+      "timestamp": "\u00a9",
+      "event": "2025",
+      "error": "Mobile Security Framework - MobSF |"
+    },
+    {
+      "timestamp": "Ajin",
+      "event": "Abraham",
+      "error": "|"
+    }
+  ],
+  "file_metadata": {
+    "filename": "1_mobsf_bitbar-sample-app_20250419_123624.pdf",
+    "file_size": 619085,
+    "last_modified": "2025-06-10T12:10:52.164906"
+  }
+}

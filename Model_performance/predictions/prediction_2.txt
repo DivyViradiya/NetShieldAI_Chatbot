@@ -1,0 +1,13 @@
+key findings
+
+1. disabling of tlsv1.0 and tlsv1.1: the sslscan report indicates that tlsv1.0 and tlsv1.1 are disabled on the target host, which is a positive security measure. disabling these older protocols protects against vulnerabilities such as the heartbleed vulnerability, which was a critical vulnerability that affected many servers using the older protocols. disabling these protocols can also prevent downgrade attacks, where an attacker forces the communication to use an insecure protocol.
+
+2. enabled tlsv1.2: the sslscan report shows that tlsv1.2 is enabled on the target host. tlsv1.2 is the latest version of the protocol and provides a secure and up-to-date communication method for secure transmission of data. enabling this protocol is a positive security measure, as it provides better security features and stronger encryption than the older protocols.
+
+3. support for tls fallback scsv: the sslscan report indicates that the server supports tls fallback scsv, which is a security feature that prevents clients from downgrading the protocol to an insecure version. however, this feature can also be exploited by attackers to downgrade the protocol to an insecure version if they can trick the client into connecting over that protocol. therefore, disabling tls fallback scsv can help prevent downgrade attacks.
+
+4. disabled compression: the sslscan report shows that the server has compression disabled. compression can be exploited in some attacks, such as the crime attack, which can be used to extract sensitive data from the server. disabling compression is a positive security measure, as it prevents these types of attacks.
+
+5. support for multiple ciphers: the sslscan report indicates that the server supports multiple ciphers, including both preferred and accepted ciphers for tlsv1.2. this means that the server has a variety of ciphers that can be used for secure communication. however, some of these ciphers may be weak and can be exploited by attackers if they can find a way to exploit them. reviewing and removing any weak ciphers from the server configuration can help strengthen security.
+
+6. valid ssl certificate: the sslscan report shows that the ssl certificate is valid and has a key strength of 4096 bits, indicating that the server has proper authentication and encryption in place. the ssl certificate provides authentication of the server's identity and ensures that the communication between the server and the client is encrypted and secure.

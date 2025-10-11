@@ -1,0 +1,23 @@
+the sslscan report analyzes the ssl/tls configuration of the target host with ip address 137.74.187.103. it confirms that tlsv1.0 and tlsv1.1 are disabled, and tlsv1.2 is active. tlsv1.3 is currently not supported. tls fallback scsv is enabled, session renegotiation is unsupported, and compression is turned off. the server accepts multiple ciphers for tlsv1.2, including preferred e and a cipher suites. ssl certificate details include subject, issuer, algorithm, key size, and alternate names. the certificate is valid from march 25, 2025 to march 25, 2026.
+
+key findings
+
+1. tlsv1.0 and tlsv1.1 are disabled, which helps protect the server from heartbleed vulnerability.  
+2. tlsv1.2 is enabled and provides secure communication.  
+3. tls fallback scsv is supported and may expose the server to downgrade attacks.  
+4. compression is disabled, reducing the risk of attacks that exploit compression.  
+5. multiple ciphers are supported, both preferred and accepted for tlsv1.2.  
+6. the ssl certificate is valid with 4096-bit rsa encryption, offering strong protection.
+
+implications
+
+1. tls fallback scsv may allow downgrade attacks if misused by attackers.  
+2. the server avoids heartbleed risk by not supporting outdated tls versions.  
+3. presence of weak ciphers can lead to vulnerabilities if not properly managed.  
+4. a strong, valid certificate ensures authentication and encryption are in place.
+
+remediation steps
+
+1. disable tls fallback scsv to avoid potential downgrade exploitation.  
+2. identify and remove any weak ciphers from the server's tls configuration.  
+3. make sure only tlsv1.2 and tlsv1.3 are enabled to maintain protocol security.
