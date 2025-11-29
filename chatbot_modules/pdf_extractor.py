@@ -65,8 +65,8 @@ if __name__ == "__main__":
     # You would typically have a PDF file to test with.
     # For demonstration, let's assume 'dummy_report.pdf' exists in a 'documents' folder
 
-    dummy_pdf_path = r"D:\NetShieldAI_Chatbot\chatbot_modules\documents\1_zap_auth_20250419_164709.pdf"
-    output_txt_path = r"D:\NetShieldAI_Chatbot\chatbot_modules\documents\extracted_text.txt"
+    dummy_pdf_path = r"D:\NetShieldAI_Chatbot\Data\reports\ssl_report.pdf"
+    output_txt_path = r"D:\NetShieldAI_Chatbot\Data\reports\extracted_text.txt"
 
     print(f"Attempting to extract text from: {dummy_pdf_path}")
     try:

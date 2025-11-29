@@ -6,16 +6,16 @@ import uuid
 import threading
 import time
 from typing import Dict, Any, List, Optional
-import dotenv
-from fastapi.middleware.cors import CORSMiddleware
-from fastapi import File, UploadFile, HTTPException, status, Query, Form# Import Query for query parameters
+import dotenv # type: ignore
+from fastapi.middleware.cors import CORSMiddleware # type: ignore
+from fastapi import File, UploadFile, HTTPException, status, Query, Form# Import Query for query parameters # type: ignore
 
 dotenv.load_dotenv()
 
 # FastAPI imports
-from fastapi import FastAPI, Request, File, UploadFile, HTTPException, status
-from fastapi.responses import JSONResponse
-from pydantic import BaseModel
+from fastapi import FastAPI, Request, File, UploadFile, HTTPException, status # type: ignore
+from fastapi.responses import JSONResponse # type: ignore
+from pydantic import BaseModel # type: ignore
 
 # Ensure the 'chatbot_modules' directory is in the Python path for module imports
 current_dir = os.path.dirname(os.path.abspath(__file__))
@@ -33,11 +33,6 @@ try:
     from chatbot_modules.nmap_parser import process_nmap_report_file
     from chatbot_modules.zap_parser import process_zap_report_file
     from chatbot_modules.ssl_parser import process_sslscan_report_file
-    from chatbot_modules.mobsf_android_parser import process_mobsf_android_report_file
-    from chatbot_modules.mobsf_ios_parser import process_mobsf_ios_report_file
-    from chatbot_modules.nikto_parser import process_nikto_report_file
-    from chatbot_modules.sql_parser import process_sql_report_file
-    from chatbot_modules.cloud_parser import process_cloud_report_file
     # The summarizer imports remain the same, but their internal calls will change
     from chatbot_modules.summarizer import summarize_report_with_llm, summarize_chat_history_segment
     from chatbot_modules.pdf_extractor import extract_text_from_pdf
@@ -230,25 +225,9 @@ def detect_report_type_web(filename: str) -> Optional[str]:
     if 'zap' in lower_filename:
         logger.info("Detected 'zap' from filename.")
         return "zap"
-    if 'sslscan' in lower_filename:
+    if 'ssl' in lower_filename:
         logger.info("Detected 'sslscan' from filename.")
         return "sslscan"
-    if 'mobsf' in lower_filename and 'ios' in lower_filename:
-        logger.info("Detected 'mobsf_ios' from filename.")
-        return "mobsf_ios"
-    if 'mobsf' in lower_filename and 'android' in lower_filename:
-        logger.info("Detected 'mobsf_android' from filename.")
-        return "mobsf_android"
-    if 'nikto' in lower_filename:
-        logger.info("Detected 'nikto' from filename.")
-        return "nikto"
-    if 'sqlmap' in lower_filename:
-        logger.info("Detected 'sqlmap' from filename.")
-        return "sqlmap"
-    if any(keyword in lower_filename for keyword in ["prowler", "cloudsploit"]):
-        logger.info("Detected 'cloud' from filename.")
-        return "cloud"
-
     # If no keywords match, return None
     logger.warning(f"Could not determine report type from filename: '{filename}'")
     return None
@@ -281,21 +260,61 @@ def is_report_specific_question_web(question: str, report_data: Dict[str, Any]) 
                     return True
 
     elif "zap" in report_tool:
-        for vuln in report_data.get("vulnerabilities", []):
-            if vuln.get("name") and vuln["name"].lower() in question_lower:
+            # Pre-process the question once for efficiency
+            question_lower = question_lower.lower().strip()
+            
+            # Keywords list to cover general risk categories
+            risk_keywords = ["risk", "vulnerability", "finding", "issue", "security", "alerts"]
+            
+            # Check for general keywords or a simple risk level match outside the loop
+            if any(keyword in question_lower for keyword in risk_keywords) or \
+            any(level in question_lower for level in ["high", "medium", "low", "informational"]):
+                # This is a general query, highly relevant
                 return True
-            if vuln.get("cwe_id") and f"cwe {vuln['cwe_id']}" in question_lower:
-                return True
-            if vuln.get("wasc_id") and f"wasc {vuln['wasc_id']}" in question_lower:
-                return True
-            if vuln.get("risk") and vuln["risk"].lower() in question_lower:
-                return True
-            for url_detail in vuln.get("urls", []):
-                if url_detail.get("url") and url_detail["url"].lower() in question_lower:
-                    if url_detail["url"].lower() in question_lower or \
-                       url_detail["url"].split('//')[-1].split('/')[0].lower() in question_lower:
+
+            for vuln in report_data.get("vulnerabilities", []):
+                # Check 1: Match by Vulnerability Name (Case-insensitive)
+                vuln_name = vuln.get("name")
+                if vuln_name and vuln_name.lower() in question_lower:
+                    return True
+
+                # Check 2: Match by Standard Identifiers (CWE, WASC, Plugin ID)
+                if vuln.get("cwe_id") and f"cwe {vuln['cwe_id']}" in question_lower:
+                    return True
+                if vuln.get("wasc_id") and f"wasc {vuln['wasc_id']}" in question_lower:
+                    return True
+                # Added check for the specific Plugin ID, often used in ZAP reports
+                if vuln.get("plugin_id") and f"plugin {vuln['plugin_id']}" in question_lower:
+                    return True
+
+                # Check 3: Match by Risk Level (Specific to the finding)
+                # Removed redundant risk level check as it's often too broad for a specific finding's loop.
+                # The general risk check outside the loop covers broad queries.
+
+                # Check 4: Match by Affected URLs (Including TLD/Root Domain)
+                # Check the root URL of the finding (present in the JSON structure you provided)
+                root_url = vuln.get("url")
+                if root_url and root_url.lower() in question_lower:
+                    return True
+                
+                # Check for matches against the root domain from the root URL
+                if root_url:
+                    try:
+                        # Extracts 'testphp.vulnweb.com' from 'http://testphp.vulnweb.com/'
+                        domain = root_url.split('//')[-1].split('/')[0].lower()
+                        if domain in question_lower:
+                            return True
+                    except Exception:
+                        pass # Safely ignore errors in URL parsing
+
+                # Check 5: Match by Specific Instance URL (If detailed instance data exists)
+                for url_detail in vuln.get("urls", []):
+                    instance_url = url_detail.get("url")
+                    if instance_url and instance_url.lower() in question_lower:
                         return True
-    
+
+            return False
+        
     elif "sslscan" in report_tool:
         ssl_metadata = report_data.get("scan_metadata", {})
         if ssl_metadata.get("target_host") and ssl_metadata["target_host"].lower() in question_lower:
@@ -316,148 +335,11 @@ def is_report_specific_question_web(question: str, report_data: Dict[str, Any]) 
         if "tls" in question_lower or "ssl" in question_lower or "cipher" in question_lower or "certificate" in question_lower:
             return True
 
-    elif "nikto" in report_tool:
-        host_details = report_data.get("host_details", {})
-        scan_summary = report_data.get("scan_summary", {})
-
-        # Check host details
-        if host_details.get("hostname") and host_details["hostname"].lower() in question_lower:
-            return True
-        if host_details.get("ip") and host_details["ip"].lower() in question_lower:
-            return True
-        if host_details.get("port") and str(host_details["port"]) in question_lower:
-            return True
-        if host_details.get("http_server") and host_details["http_server"].lower() in question_lower:
-            return True
-        if host_details.get("site_link_name") and host_details["site_link_name"].lower() in question_lower:
-            return True
-        if host_details.get("site_link_ip") and host_details["site_link_ip"].lower() in question_lower:
-            return True
-
-        # Check scan summary details
-        if scan_summary.get("software") and scan_summary["software"].lower() in question_lower:
-            return True
-        # Check for presence of CLI options generally, as details can be long
-        if "cli options" in question_lower and scan_summary.get("cli_options"):
-            return True
-        
-        # Check individual findings (descriptions, URIs, methods, references)
-        for finding in report_data.get("findings", []):
-            if finding.get("description") and finding["description"].lower() in question_lower:
-                return True
-            if finding.get("uri") and finding["uri"].lower() in question_lower:
-                return True
-            if finding.get("http_method") and finding["http_method"].lower() in question_lower:
-                return True
-            if finding.get("references"):
-                if any(ref.lower() in question_lower for ref in finding["references"]):
-                    return True
-
-        # Broad keywords relevant to Nikto scans
-        if "nikto" in question_lower or "web server" in question_lower or "header" in question_lower or \
-           "vulnerability" in question_lower or "finding" in question_lower or "security" in question_lower or \
-           "http" in question_lower or "site" in question_lower or "host" in question_lower or \
-           "cdn" in question_lower or "request id" in question_lower or "varnish" in question_lower:
-            return True
-
-    elif "mobsf" in report_tool and "android" in report_tool:
-        app_info = report_data.get("app_information", {})
-        scan_metadata = report_data.get("scan_metadata", {})
-        summary = report_data.get("summary", {})
-        certificate_info = report_data.get("certificate_information", {})
-        
-        if app_info.get("App Name") and app_info["App Name"].lower() in question_lower: return True
-        if app_info.get("Package Name") and app_info["Package Name"].lower() in question_lower: return True
-        if scan_metadata.get("file_name") and scan_metadata["file_name"].lower() in question_lower: return True
-        if scan_metadata.get("app_security_score") and (str(scan_metadata["app_security_score"]).split('/')[0] in question_lower or scan_metadata["app_security_score"].lower() in question_lower): return True
-        if scan_metadata.get("grade") and scan_metadata["grade"].lower() in question_lower: return True
-        if summary.get("total_issues") and str(summary["total_issues"]) in question_lower: return True
-        for severity_type, count in summary.get("findings_severity", {}).items():
-            if severity_type.lower() in question_lower and str(count) in question_lower: return True
-
-        vulnerability_sections = [
-            report_data.get("certificate_analysis_findings", []),
-            report_data.get("manifest_analysis_findings", []),
-            report_data.get("code_analysis_findings", [])
-        ]
-        for section in vulnerability_sections:
-            for finding in section:
-                if finding.get("title") and finding["title"].lower() in question_lower: return True
-                if finding.get("issue") and finding["issue"].lower() in question_lower: return True
-                if finding.get("severity") and finding["severity"].lower() in question_lower: return True
-                if finding.get("description") and finding["description"].lower() in question_lower: return True
-
-        for perm_entry in report_data.get("application_permissions", []):
-            if perm_entry.get("permission") and perm_entry["permission"].lower() in question_lower: return True
-
-        if certificate_info.get("X.509 Subject") and certificate_info["X.509 Subject"].lower() in question_lower: return True
-        if certificate_info.get("md5_fingerprint") and certificate_info["md5_fingerprint"].lower() in question_lower: return True
-
-        for apkid_finding in report_data.get("apkid_analysis", []):
-            if apkid_finding.get("finding") and apkid_finding["finding"].lower() in question_lower: return True
-
-        abused_perms = report_data.get("abused_permissions_summary", {}).get("Malware Permissions", {})
-        if abused_perms.get("description") and abused_perms["description"].lower() in question_lower: return True
-        
-        mobsf_general_keywords = [
-            "mobsf", "android report", "app info", "manifest", "permissions", 
-            "abused permissions", "certificate", "signature", "sdk", "activity",
-            "security score", "issues", "vulnerabilities", "findings", "apkid"
-        ]
-        if any(keyword in question_lower for keyword in mobsf_general_keywords): return True
-
-    elif "mobsf" in report_tool and "ios" in report_tool:
-        app_info = report_data.get("app_information", {})
-        scan_metadata = report_data.get("scan_metadata", {})
-        summary = report_data.get("summary", {})
-        code_signature_info = report_data.get("code_signature_info", {}) 
-
-        if app_info.get("App Name") and app_info["App Name"].lower() in question_lower: return True
-        if app_info.get("Identifier") and app_info["Identifier"].lower() in question_lower: return True
-        if scan_metadata.get("file_name") and scan_metadata["file_name"].lower() in question_lower: return True
-        if scan_metadata.get("app_security_score") and (str(scan_metadata["app_security_score"]).split('/')[0] in question_lower or scan_metadata["app_security_score"].lower() in question_lower): return True
-        if scan_metadata.get("grade") and scan_metadata["grade"].lower() in question_lower: return True
-        if summary.get("total_issues") and str(summary["total_issues"]) in question_lower: return True
-        for severity_type, count in summary.get("findings_severity", {}).items():
-            if severity_type.lower() in question_lower and str(count) in question_lower: return True
-
-        vulnerability_sections = [
-            report_data.get("app_transport_security_findings", []),
-            report_data.get("ipa_binary_code_analysis_findings", []),
-            report_data.get("ipa_binary_analysis_findings", [])
-        ]
-        for section in vulnerability_sections:
-            for finding in section:
-                if finding.get("issue") and finding["issue"].lower() in question_lower: return True
-                if finding.get("severity") and finding["severity"].lower() in question_lower: return True
-                if finding.get("description") and finding["description"].lower() in question_lower: return True
-                if finding.get("protection") and finding["protection"].lower() in question_lower: return True
-
-        if code_signature_info:
-            if code_signature_info.get("Team ID") and code_signature_info["Team ID"].lower() in question_lower: return True
-
-        for country_data in report_data.get("ofac_sanctioned_countries", []):
-            if country_data.get("domain") and country_data["domain"].lower() in question_lower: return True
-
-        for domain_data in report_data.get("domain_malware_check", []):
-            if domain_data.get("domain") and domain_data["domain"].lower() in question_lower: return True
-            if domain_data.get("status") and domain_data["status"].lower() in question_lower: return True
-        
-        mobsf_general_ios_keywords = [
-            "mobsf", "ios report", "app info", "app transport security", "ats",
-            "ipa binary analysis", "code signing", "certificate", "provisioning profile",
-            "security score", "issues", "vulnerabilities", "findings", "ofac", "malware domain",
-            "binary protection", "objective-c", "swift"
-        ]
-        if any(keyword in question_lower for keyword in mobsf_general_ios_keywords): return True
-
-    return False
-
-
 
 @app.post("/upload_report")
 async def upload_report(
-    file: UploadFile = File(..., alias="report_file"),
+    # --- CORE FIX: Change alias to "file" to match client (curl/Swagger) submission ---
+    file: UploadFile = File(..., alias="file"),
     llm_mode: str = Query(config.DEFAULT_LLM_MODE, description=f"Choose LLM mode: {config.SUPPORTED_LLM_MODES}")
 ):
     """
@@ -518,16 +400,6 @@ async def upload_report(
             parsed_data = process_zap_report_file(filepath)
         elif report_type == 'sslscan':
             parsed_data = process_sslscan_report_file(filepath)
-        elif report_type == 'mobsf_android':
-            parsed_data = process_mobsf_android_report_file(filepath)
-        elif report_type == 'mobsf_ios':
-            parsed_data = process_mobsf_ios_report_file(filepath)
-        elif report_type == 'nikto':
-            parsed_data = process_nikto_report_file(filepath)
-        elif report_type == 'cloud':
-            parsed_data = process_cloud_report_file(filepath)
-        elif report_type == 'sqlmap':
-            parsed_data = process_sql_report_file(filepath)
 
         if parsed_data:
             session_data = _session_store[session_id]
