@@ -1,5 +1,9 @@
 import PyPDF2
 import os
+import logging
+
+# Initialize module-level logger
+logger = logging.getLogger(__name__)
 
 def extract_text_from_pdf(pdf_path: str) -> str:
     """
@@ -17,26 +21,42 @@ def extract_text_from_pdf(pdf_path: str) -> str:
         Exception: For other unexpected errors during extraction.
     """
     if not os.path.exists(pdf_path):
+        logger.error(f"PDF file not found at: {pdf_path}")
         raise FileNotFoundError(f"The PDF file was not found: {pdf_path}")
 
     extracted_text = ""
     try:
+        logger.info(f"Starting text extraction for: {pdf_path}")
         with open(pdf_path, 'rb') as file:
             reader = PyPDF2.PdfReader(file)
-            # Iterate through its pages 
-            for page_num in range(len(reader.pages)):
-                page = reader.pages[page_num]
-                text = page.extract_text()
-                if text:
-                    extracted_text += text + "\n" # Add a newline for readability between pages
-    except PyPDF2.errors.PdfReadError as e:
-        # Include robust error handling for unreadable PDFs or extraction issues 
-        raise PyPDF2.errors.PdfReadError(f"Error reading PDF file {pdf_path}: {e}. It might be corrupted or encrypted.")
-    except Exception as e:
-        # Include robust error handling for unreadable PDFs or extraction issues 
-        raise Exception(f"An unexpected error occurred during PDF extraction from {pdf_path}: {e}")
+            
+            # Log the number of pages found
+            num_pages = len(reader.pages)
+            logger.info(f"PDF loaded. Total pages: {num_pages}")
 
-    return extracted_text
+            # Iterate through its pages 
+            for i, page in enumerate(reader.pages):
+                try:
+                    text = page.extract_text()
+                    if text:
+                        extracted_text += text + "\n"
+                    else:
+                        logger.warning(f"No text extracted from page {i+1}. It might be an image-only page.")
+                except Exception as page_error:
+                    logger.warning(f"Could not extract text from page {i+1}: {page_error}")
+                    continue # Skip this page and try the next one
+
+        total_chars = len(extracted_text)
+        logger.info(f"Extraction complete. Extracted {total_chars} characters.")
+        
+        return extracted_text
+
+    except PyPDF2.errors.PdfReadError as e:
+        logger.error(f"PyPDF2 Error reading {pdf_path}: {e}")
+        raise PyPDF2.errors.PdfReadError(f"Error reading PDF file. It might be corrupted or encrypted.")
+    except Exception as e:
+        logger.error(f"Unexpected error extracting PDF {pdf_path}: {e}")
+        raise Exception(f"An unexpected error occurred during PDF extraction: {e}")
 
 def save_text_to_file(text: str, output_path: str) -> None:
     """
@@ -45,9 +65,6 @@ def save_text_to_file(text: str, output_path: str) -> None:
     Args:
         text (str): The text content to save.
         output_path (str): The path where the text file should be saved.
-
-    Raises:
-        IOError: If there's an error writing to the file.
     """
     try:
         # Ensure the output directory exists
@@ -55,43 +72,35 @@ def save_text_to_file(text: str, output_path: str) -> None:
         
         with open(output_path, 'w', encoding='utf-8') as file:
             file.write(text)
-        print(f"Text successfully saved to: {output_path}")
+        logger.info(f"Text successfully saved to: {output_path}")
     except IOError as e:
-        raise IOError(f"Error saving text to file {output_path}: {e}")
+        logger.error(f"Failed to save text to {output_path}: {e}")
+        raise IOError(f"Error saving text to file: {e}")
 
 if __name__ == "__main__":
-    # --- Example Usage (for testing) ---
-    # Create a dummy PDF for testing (if you don't have one)
-    # You would typically have a PDF file to test with.
-    # For demonstration, let's assume 'dummy_report.pdf' exists in a 'documents' folder
-
+    # --- Example Usage (for independent testing) ---
+    logging.basicConfig(level=logging.INFO)
+    
+    # Use raw string for paths to handle backslashes on Windows
     dummy_pdf_path = r"D:\NetShieldAI_Chatbot\Data\reports\ssl_report.pdf"
     output_txt_path = r"D:\NetShieldAI_Chatbot\Data\reports\extracted_text.txt"
 
-    print(f"Attempting to extract text from: {dummy_pdf_path}")
-    try:
-        # Create a documents directory for example if it doesn't exist
-        if not os.path.exists("documents"):
-            os.makedirs("documents")
-            print("Created 'documents' directory. Please place a PDF inside it for testing.")
-
-        # Extract text from PDF
-        extracted_content = extract_text_from_pdf(dummy_pdf_path)
-        
-        # Save the extracted text to a file
-        save_text_to_file(extracted_content, output_txt_path)
-        
-        # Print first 500 characters to console for verification
-        print("\n--- Extracted Text (first 500 characters) ---")
-        print(extracted_content[:500])
-        print("\n--- End of Extracted Text ---")
-        print(f"Full text has been saved to: {output_txt_path}")
-        
-    except FileNotFoundError as e:
-        print(f"Error: {e}. Please ensure the PDF file exists at the specified path.")
-    except PyPDF2.errors.PdfReadError as e:
-        print(f"PDF Read Error: {e}")
-    except IOError as e:
-        print(f"File I/O Error: {e}")
-    except Exception as e:
-        print(f"An unexpected error occurred: {e}")
+    if os.path.exists(dummy_pdf_path):
+        print(f"Attempting to extract text from: {dummy_pdf_path}")
+        try:
+            # Extract text from PDF
+            extracted_content = extract_text_from_pdf(dummy_pdf_path)
+            
+            # Save the extracted text to a file
+            save_text_to_file(extracted_content, output_txt_path)
+            
+            # Print preview
+            print("\n--- Extracted Text Preview (first 500 chars) ---")
+            print(extracted_content[:500])
+            print("\n--- End of Preview ---")
+            
+        except Exception as e:
+            print(f"Test run failed: {e}")
+    else:
+        print(f"Test skipped: File not found at {dummy_pdf_path}")
+        print("To test, update the 'dummy_pdf_path' variable in the __main__ block.")

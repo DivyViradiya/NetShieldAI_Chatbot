@@ -5,3 +5,101 @@ uvicorn app:app --host 0.0.0.0 --port 5000
 
 To access the app on this machine:
 http://45.119.14.140:5000/
+
+
+
+Overview
+The app.py file serves as the main entry point for the NetShieldAI backend, built using the FastAPI framework. It orchestrates the entire lifecycle of a user session, from initializing Large Language Models (LLMs) and Vector Database connections to handling file uploads, processing security reports, and managing chat interactions.
+
+Key Components & Workflow
+1. Global Resource Initialization
+Startup Event: On application startup, the system initializes global resources to avoid reloading heavy models for every request.
+
+LLM Loading: It loads either a local LLM (using llama-cpp-python) or the Google Gemini API based on the configuration.
+
+RAG Components: It initializes the embedding model (SentenceTransformer) and the connection to the Pinecone vector database.
+
+Thread Safety: A threading lock (_init_lock) ensures that these resources are initialized safely, preventing race conditions during concurrent startup requests.
+
+2. Report Upload & Processing (/upload_report)
+This endpoint transforms raw PDF reports into a queryable knowledge base for the session.
+
+File Handling: Accepts PDF uploads and validates the file extension.
+
+Type Detection: It heuristically detects the report type (Nmap, ZAP, or SSLScan) based strictly on the filename.
+
+Parsing: The file is passed to specific parsers (process_nmap_report_file, process_zap_report_file, etc.) to convert unstructured PDF text into structured JSON data.
+
+Dynamic RAG Creation:
+
+The structured data is "chunked" into text blocks.
+
+These chunks are embedded and upserted into a temporary, session-specific Pinecone namespace (e.g., report-{session_id}). This ensures that one user's report data does not leak into another user's session.
+
+Summarization: An initial executive summary is generated using the LLM and returned to the frontend immediately.
+
+3. Chat & RAG Logic (/chat)
+This is the core "brain" of the application, routing questions to the correct information source.
+
+The logic follows a specific decision tree for every user message:
+
+Session Management: Checks for a valid session_id; if missing, it creates a new "general chat" session.
+
+Intent Detection: The system determines if a question is "report-specific" using heuristic keywords (e.g., "port", "vulnerability") and data from the loaded report.
+
+Dual RAG Strategy:
+
+Internal RAG (Report-Specific): If the question is about the uploaded file, it retrieves context from the temporary session namespace in Pinecone.
+
+External RAG (General): If the question is general (e.g., "What is XSS?"), it queries a static "knowledge base" namespace (owasp-cybersecurity-kb).
+
+Context Construction: It combines the retrieved RAG context, the chat history (summarized if it exceeds 8 turns), and the user's question into a final prompt for the LLM.
+
+Retry Logic: The system includes an execute_with_retry helper to handle 429 Quota Exceeded errors from the Gemini API by waiting and retrying up to 3 times.
+
+4. Session Cleanup (/clear_chat)
+To maintain hygiene and privacy:
+
+Namespace Deletion: Deletes the specific Pinecone namespace associated with the session.
+
+File Removal: Deletes the physical files stored in the uploads directory for that session.
+
+Memory Clearing: Removes the session data from the in-memory _session_store.
+
+
+
+
+
+
+
+Phase 1: The Persistence Layer (Database & User Identity)
+Goal: Ensure chat history and report context survive server restarts and are linked to user_id.
+Introduce a Lightweight Database (SQLite):
+The in-memory dictionary _session_store in app.py is too volatile.
+We will replace it with SQLite (using SQLAlchemy or direct SQL). It requires no separate server installation and works perfectly for this scale.
+New Tables Needed:
+UserSession: Stores user_id (from Flask), session_id, pinecone_namespace, and report_type.
+ChatHistory: Stores the actual messages (role, content, timestamp) linked to a session.
+Update FastAPI Endpoints (app.py):
+Modify /chat and /upload_report to accept user_id as a mandatory field (just like session_id).
+Logic Change: When a request comes in:
+Query DB: "Does user_id have an active session?"
+If Yes: Load the pinecone_namespace and recent ChatHistory from SQL.
+If No: Create a new entry.
+Update Flask Proxy (flask_app.py):
+In every requests.post() call to the backend, inject user_id: current_user.id.
+
+Phase 2: Performance (Async & Concurrency)
+Goal: Stop the backend from freezing when one user uploads a PDF.
+Refactor Blocking Calls:
+In app.py, the functions process_nmap_report_file and extract_text_from_pdf are "CPU-bound" (they hog the processor).
+We will wrap these in asyncio.to_thread or run_in_threadpool.
+Result: The server can answer simple chat questions for User A while simultaneously parsing a heavy PDF for User B.
+
+Phase 3: Robustness (Smarter Detection)
+Goal: Stop the bot from crashing if a file is renamed or messy.
+Implement Magic Number Detection:
+Modify detect_report_type_web in app.py.
+Instead of checking if the filename contains "nmap", we will read the first 1KB of the file content to find signature strings like "Nmap scan report" or "OWASP ZAP".
+Upgrade Parsing Logic:
+Since we are persisting data now, bad data sticks around longer. We will ensure the parsers fail gracefully if they can't read a file, rather than crashing the whole thread.

@@ -16,9 +16,6 @@ if project_root not in sys.path:
 
 from chatbot_modules import config 
 
-
-
-
 # --- Main Router Function ---
 def _format_nmap_summary_prompt(parsed_data: Dict[str, Any]) -> str:
     """
