@@ -12,7 +12,8 @@ import dotenv
 # --- FASTAPI & PYDANTIC IMPORTS ---
 from fastapi import FastAPI, Request, File, UploadFile, HTTPException, status, Query, Form
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, StreamingResponse # <--- ADDED StreamingResponse
+from starlette.concurrency import iterate_in_threadpool # <--- ADDED Helper for sync generators
 from pydantic import BaseModel
 
 dotenv.load_dotenv()
@@ -467,7 +468,7 @@ async def upload_report(
 
 @app.post("/chat")
 async def chat(chat_message: ChatMessage):
-    """Handles user chat messages and returns AI responses."""
+    """Handles user chat messages and returns AI responses (BLOCKING MODE)."""
     user_question = chat_message.message
     session_id = chat_message.session_id
     user_id = chat_message.user_id 
@@ -613,6 +614,152 @@ async def chat(chat_message: ChatMessage):
     except Exception as e:
         logger.error(f"Error generating LLM response for session {session_id}: {e}", exc_info=True)
         raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=f'An error occurred while generating response: {e}')
+
+
+# --- NEW STREAMING CHAT ENDPOINT ---
+@app.post("/chat_stream")
+async def chat_stream(chat_message: ChatMessage):
+    """
+    Handles user chat messages via STREAMING.
+    Yields chunks of text as they are generated, and saves to DB only upon completion.
+    """
+    user_question = chat_message.message
+    session_id = chat_message.session_id
+    user_id = chat_message.user_id 
+
+    # --- 1. Session Retrieval & Creation ---
+    session_data = None
+    
+    if session_id:
+        session_data = db_utils.get_session_by_id(session_id)
+        
+    if not session_data:
+        session_data = db_utils.get_user_session(user_id)
+
+    if not session_data:
+        logger.info(f"No existing session found for user {user_id}. Creating new general session.")
+        new_session_id = str(uuid.uuid4())
+        db_utils.update_or_create_session(
+            user_id=user_id, 
+            session_id=new_session_id, 
+            report_type="General",
+            title="General Chat"
+        )
+        session_id = new_session_id
+        session_data = db_utils.get_session_by_id(session_id)
+    else:
+        session_id = session_data['session_id']
+        db_utils.update_or_create_session(user_id=user_id, session_id=session_id)
+
+    # --- 2. Persist User Message Immediately ---
+    # We save the user message now so it appears in history even if stream fails mid-way
+    db_utils.add_message(session_id, "user", user_question)
+
+    # --- 3. Build Context (Duplicate logic from /chat to maintain intelligence) ---
+    current_parsed_report = session_data.get('parsed_report_data')
+    current_report_type = session_data.get('report_type')
+    current_report_namespace = session_data.get('pinecone_namespace')
+
+    # Fetch History
+    chat_history_db = db_utils.get_chat_history(session_id, limit=config.CHAT_HISTORY_MAX_TURNS + 2)
+    chat_history = [{"role": row['role'], "content": row['content']} for row in chat_history_db]
+    
+    # We don't append the *current* question to history list used for summarization
+    # because we want to summarize *previous* turns.
+    
+    summarized_context_str = ""
+    if len(chat_history) > config.CHAT_HISTORY_MAX_TURNS:
+        # Simple summarization skip for streaming speed, or you can enable it:
+        # For now, we take the last N messages directly to ensure speed.
+        chat_history = chat_history[-config.CHAT_HISTORY_MAX_TURNS:]
+
+    llm_prompt_content = ""
+    rag_context = ""
+
+    # RAG Logic
+    if current_parsed_report and is_report_specific_question_web(user_question, current_parsed_report):
+        embedding_model = get_embedding_model_instance()
+        pinecone_index = get_pinecone_index_instance()
+
+        if current_report_namespace and embedding_model and pinecone_index:
+            rag_context = retrieve_internal_rag_context(user_question, current_report_namespace, top_k=config.DEFAULT_RAG_TOP_K)
+            if rag_context:
+                llm_prompt_content += f"Here is some relevant information from the current report:\n{rag_context}\n\n"
+            else:
+                llm_prompt_content += "No specific relevant information found in the current report for this query. "
+        else:
+            llm_prompt_content += "Internal RAG components not available. Answering based on knowledge.\n"
+        
+        llm_prompt_content += f"The user is asking a question related to the previously provided {str(current_report_type).upper()} document/report. Please refer to the content and your previous summary to answer.\n"
+    else:
+        # External RAG
+        embedding_model = get_embedding_model_instance()
+        pinecone_index = get_pinecone_index_instance()
+
+        if embedding_model and pinecone_index:
+            rag_context = retrieve_rag_context(user_question, top_k=config.DEFAULT_RAG_TOP_K, namespace="owasp-cybersecurity-kb") 
+            if rag_context:
+                llm_prompt_content += f"Here is some relevant information from a cybersecurity knowledge base:\n{rag_context}\n\n"
+        else:
+            llm_prompt_content += "RAG components not loaded. Answering based on general knowledge.\n"
+
+    # Build Prompt String
+    concatenated_prompt = ""
+    for msg in chat_history:
+        if msg["role"] == "user":
+            concatenated_prompt += f"User: {msg['content']}\n"
+        elif msg["role"] == "assistant":
+            concatenated_prompt += f"Assistant: {msg['content']}\n"
+        elif msg["role"] == "system":
+            concatenated_prompt += f"System: {msg['content']}\n"
+    
+    concatenated_prompt += f"User: {user_question}\n"
+    final_llm_prompt = f"{llm_prompt_content}\n{concatenated_prompt}\nAssistant:"
+
+    # --- 4. Stream Generator ---
+    async def response_generator():
+        llm_mode = config.DEFAULT_LLM_MODE
+        full_response_accumulator = ""
+        
+        try:
+            llm_instance = _llm_instances_global.get(llm_mode)
+            if not llm_instance:
+                yield "Error: LLM model not loaded."
+                return
+
+            # A. STREAMING LOGIC
+            if llm_mode == "gemini":
+                # Call Async Generator
+                async for chunk in gemini_llm_module.generate_response_stream(llm_instance, final_llm_prompt):
+                    full_response_accumulator += chunk
+                    yield chunk
+                    # --- SLOW DOWN GEMINI ---
+                    await asyncio.sleep(0.03) # 30ms delay per chunk (Adjust as needed)
+
+            elif llm_mode == "local":
+                # Call Sync Generator
+                sync_gen = local_llm_module.generate_response_stream(llm_instance, final_llm_prompt)
+                
+                async for chunk in iterate_in_threadpool(sync_gen):
+                    full_response_accumulator += chunk
+                    yield chunk
+            
+            # B. SAVE TO DB
+            if full_response_accumulator:
+                db_utils.add_message(session_id, "assistant", full_response_accumulator)
+                logger.info(f"Stream finished. Saved to DB for session {session_id}")
+                
+        except Exception as e:
+            logger.error(f"Streaming Error: {e}")
+            yield f"\n\n[System Error: {str(e)}]"
+
+    # --- 5. Return Streaming Response ---
+    # We pass session_id in header so client knows where it landed
+    return StreamingResponse(
+        response_generator(), 
+        media_type="text/plain", 
+        headers={"X-Session-ID": session_id} 
+    )
 
 
 # --- NEW ENDPOINTS FOR SESSION MANAGEMENT ---
