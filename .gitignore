@@ -1,3 +1,8 @@
 /fine_tuned_owasp_model_advanced
 /pretrained_language_model
 .env
+__pycache__/
+*.pyc
+*.db
+uploads/
+.gemini/

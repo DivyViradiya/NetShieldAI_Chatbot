@@ -11,8 +11,8 @@ SUPPORTED_LLM_MODES = ["local", "gemini"]
 
 # --- LLM Model Configuration ---
 # Local LLM (llama-cpp-python)
-LLM_MODEL_ID = "TheBloke/OpenHermes-2.5-Mistral-7B-GGUF"
-LLM_MODEL_BASENAME = "openhermes-2.5-mistral-7b.Q4_K_M.gguf"
+LLM_MODEL_ID = "Tbartowski/Qwen2.5-Coder-3B-Instruct-GGUF"
+LLM_MODEL_BASENAME = "Qwen2.5-Coder-3B-Instruct-Q4_K_M.gguf"
 LLM_MODEL_DIR = os.path.join(PROJECT_ROOT, "pretrained_language_model")
 
 # Gemini API Configuration
@@ -40,12 +40,12 @@ PINECONE_REGION = "us-east-1"
 # --- CRITICAL FIX: Token Limits ---
 # High values here (like 100,000) trigger "429 Quota Exceeded" instantly on Free Tier.
 DEFAULT_MAX_TOKENS = 8192  # Safe limit for standard responses
-DEFAULT_RAG_TOP_K = 3
+DEFAULT_RAG_TOP_K = 7
 UPLOAD_FOLDER = os.path.join(PROJECT_ROOT, "uploads")
 
 # --- Chat History Management Settings ---
-CHAT_HISTORY_MAX_TURNS = 8
-CHAT_HISTORY_SUMMARIZE_THRESHOLD = 4
+CHAT_HISTORY_MAX_TURNS = 16
+CHAT_HISTORY_SUMMARIZE_THRESHOLD = 8
 
 # --- CRITICAL FIX: Summarization Limit ---
 # Previous value (10,000,000) caused the API to reject the request.

@@ -82,8 +82,8 @@ if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO)
     
     # Use raw string for paths to handle backslashes on Windows
-    dummy_pdf_path = r"D:\NetShieldAI_Chatbot\Data\reports\ssl_report.pdf"
-    output_txt_path = r"D:\NetShieldAI_Chatbot\Data\reports\extracted_text.txt"
+    dummy_pdf_path = r"D:\NetShieldAI_Chatbot\uploads\killchain_report.pdf"
+    output_txt_path = r"D:\NetShieldAI_Chatbot\uploads\xtracted_text.txt"
 
     if os.path.exists(dummy_pdf_path):
         print(f"Attempting to extract text from: {dummy_pdf_path}")

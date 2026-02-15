@@ -1,4 +1,4 @@
-﻿uvicorn
+uvicorn
 python-dotenv
 transformers
 sentence-transformers

@@ -2,9 +2,13 @@ import os
 import re
 import json
 import uuid
+import logging
 from typing import Dict, List, Any, Optional
 from datetime import datetime
 from pathlib import Path
+
+# Initialize module logger
+logger = logging.getLogger(__name__)
 
 # Import the PDF extractor for text extraction
 try:
@@ -14,190 +18,139 @@ except ImportError:
 
 
 
-def parse_sslscan_report(raw_sslscan_text: str) -> Dict[str, Any]:
+def parse_sslscan_report(raw_text: str) -> Dict[str, Any]:
     """
-    Parses raw SSLScan report text (specifically the NetShieldAI format) 
-    into a structured dictionary using updated regular expressions.
-
-    Args:
-        raw_sslscan_text (str): The raw text content of an SSLScan report.
-
-    Returns:
-        dict: A structured dictionary containing SSLScan report information.
+    Parses the "SSL/TLS Assessment" style report (NetShieldAI) where ciphers 
+    are listed in detailed tables under protocol headers.
     """
-    # 1. Standardize and clean up the input text
-    # Replace multiple spaces/tabs with a single space to simplify matching
-    raw_sslscan_text = re.sub(r'[ \t]+', ' ', raw_sslscan_text)
-    # Standardize newlines
-    raw_sslscan_text = re.sub(r'\r\n|\r', '\n', raw_sslscan_text)
-    # Remove "Page X of Y" clutter
-    raw_sslscan_text = re.sub(r'Page \d+ of \d+\n', '', raw_sslscan_text)
+    # --- 1. Clean and Standardize Text ---
+    # Remove Page artifacts
+    clean_text = re.sub(r'Page \d+ of \d+', '', raw_text)
+    # Normalize line endings
+    clean_text = re.sub(r'\r\n|\r', '\n', clean_text).strip()
     
-    report_data: Dict[str, Any] = {
-        "scan_metadata": {
-            "tool": "SSLScan Report (NetShieldAI Extracted)"
-        },
-        "vulnerabilities": [],
-        "protocols": [],
+    report_data = {
+        "metadata": {},
         "server_configuration": {},
-        "ssl_certificate": {},
-        "supported_ciphers": [],
+        "vulnerabilities": [],
+        "protocols": {},  
+        "certificate_chain": {}
     }
 
-    # --- 1. Parse Scan Metadata (Target, Port, Date) ---
-    # TARGET
-    match = re.search(r'TARGET:\s*([^\s]+)', raw_sslscan_text)
-    if match:
-        target_str = match.group(1).strip()
-        # FIX: Clean up the target string for the PDF artifact's TARGET: google.comPORT: format
-        target_str = re.sub(r'PORT:$', '', target_str)
-        report_data["scan_metadata"]["target_host"] = target_str.strip()
-    
-    # PORT
-    match = re.search(r'PORT:\s*(\d+)', raw_sslscan_text)
-    if match:
-        report_data["scan_metadata"]["port"] = int(match.group(1))
-    
-    # SCAN DATE
-    match = re.search(r'SCAN DATE:\s*([^\n]+)', raw_sslscan_text)
-    if match:
-        report_data["scan_metadata"]["scan_date"] = match.group(1).strip()
+    # --- 2. Extract Header/Metadata ---
+    # Target
+    target_match = re.search(r'TARGET:\s*([^\n]+)', clean_text)
+    if target_match:
+        report_data["metadata"]["target"] = target_match.group(1).strip()
 
-    # --- 2. Parse Detected Vulnerabilities ---
-    # Finds lines starting with Severity followed by a description, ignoring the header line
-    vulnerabilities_text_block = re.search(
-        r'Detected Vulnerabilities\s*Severity\s*Vulnerability Description\s*(.*?)(?=Supported Protocols)', 
-        raw_sslscan_text, re.DOTALL)
-    
-    if vulnerabilities_text_block:
-        # Regex to capture Severity and the rest of the line as Description
-        # Note: We must handle the multi-line nature if it exists, but here it's simple line extraction.
-        # Pattern: (Severity) (Description...)
-        vuln_pattern = re.compile(r'(Medium|High|Low)\s+([^\n]+)', re.IGNORECASE)
-        for line in vulnerabilities_text_block.group(1).splitlines():
-            line = line.strip()
-            if not line:
-                continue
-            match = vuln_pattern.match(line)
-            if match:
-                report_data["vulnerabilities"].append({
-                    "severity": match.group(1).strip(),
-                    "description": match.group(2).strip()
-                })
-
-    # --- 3. Parse Supported Protocols ---
-    # Finds the protocols table block
-    protocols_text_block = re.search(
-        r'Supported Protocols\s*Protocol\s*Status\s*(.*?)(?=Server Configuration)', 
-        raw_sslscan_text, re.DOTALL)
-    
-    if protocols_text_block:
-        # Pattern: (Protocol Name/Version) (Status)
-        protocol_pattern = re.compile(r'((?:TLSv)?\d\.\d|\d)\s+(Enabled|Disabled)', re.IGNORECASE)
-        for line in protocols_text_block.group(1).splitlines():
-            line = line.strip()
-            if not line:
-                continue
-            match = protocol_pattern.match(line)
-            if match:
-                report_data["protocols"].append({
-                    "name": match.group(1).strip(),
-                    "status": match.group(2).strip().lower()
-                })
-
-    # --- 4. Parse Server Configuration (Security Features) ---
-    # These are extracted as simple key: value pairs
-    config_mappings = {
-        "heartbleed": r'Heartbleed Vulnerability:\s*([^\n]+)',
-        "tls_compression_crime": r'TLS Compression \(CRIME\):\s*([^\n]+)',
-        "secure_renegotiation": r'Secure Renegotiation:\s*([^\n]+)',
-        "fallback_scsv": r'Fallback SCSV:\s*([^\n]+)',
-    }
-    
-    for key, pattern in config_mappings.items():
-        match = re.search(pattern, raw_sslscan_text)
-        if match:
-            report_data["server_configuration"][key] = match.group(1).strip()
-            
-    # --- 5. Parse Certificate Chain (Leaf Certificate) ---
-    cert_mappings = {
-        "common_name": r'Common Name \(CN\):\s*([^\n]+)',
-        "issuer": r'Issuer:\s*([^\n]+)',
-        "signature_algorithm": r'Signature Algorithm:\s*([^\n]+)',
-        "key_details": r'Key:\s*([^\n]+)',
-        "validity": r'Validity:\s*([^\n]+)', # Will need further splitting for 'before' and 'after'
-    }
-
-    for key, pattern in cert_mappings.items():
-        match = re.search(pattern, raw_sslscan_text)
-        if match:
-            # Special handling for validity to split into before/after
-            if key == "validity":
-                # Example: Oct 27 08:33:43 2025 GMT to Jan 19 08:33:42 2026 GMT
-                validity_parts = match.group(1).split(' to ')
-                if len(validity_parts) == 2:
-                    report_data["ssl_certificate"]["not_valid_before"] = validity_parts[0].strip()
-                    report_data["ssl_certificate"]["not_valid_after"] = validity_parts[1].strip()
-                else:
-                    report_data["ssl_certificate"][key] = match.group(1).strip()
-            else:
-                report_data["ssl_certificate"][key] = match.group(1).strip()
-                
-    # --- 6. Parse Supported Ciphers Table ---
-    # Finds the ciphers table block starting after "Supported Ciphers" header
-    ciphers_text_block = re.search(
-        r'Supported Ciphers\s*Protocol\s*Cipher Name\s*Bits\s*Status\s*(.*?)Generated by NetShieldAI Reporting Engine', 
-        raw_sslscan_text, re.DOTALL)
-    
-    if ciphers_text_block:
-        # Pattern: (TLSvX.X) (Cipher Name - non-whitespace) (Bits - number) (Status - word)
-        # Note: DES-CBC3-SHA has a space in the name, so we use a complex pattern to handle it robustly
-        cipher_pattern = re.compile(
-            r'(TLSv\d\.\d)\s+([^\s]+(?:-[A-Z0-9]+)?)\s+(\d+)\s+(accepted|disabled|weak)', 
-            re.IGNORECASE)
+    # Scan Date
+    date_match = re.search(r'SCAN DATE\s*(\d{4}-\d{2}-\d{2})', clean_text)
+    if date_match:
+        report_data["metadata"]["scan_date"] = date_match.group(1)
         
-        # A simpler pattern that relies heavily on whitespace (using \s+)
-        simpler_cipher_pattern = re.compile(
-            r'(TLSv\d\.\d)\s+([A-Z0-9_-]+)\s+(\d+)\s+(accepted|disabled|weak)', re.IGNORECASE)
-        
-        # Iterate over all non-empty lines in the block
-        for line in ciphers_text_block.group(1).splitlines():
-            line = line.strip()
-            if not line:
-                continue
-            
-            # The structure for DES-CBC3-SHA in the report is "TLSv1.2 DES-CBC3-SHA 112 accepted", 
-            # where the Cipher Name contains spaces in the raw text, but is often seen compressed.
-            # Let's clean the line first by replacing excessive spaces with a single space.
-            clean_line = re.sub(r'\s+', ' ', line.strip())
+    # Grade [FIXED]
+    # Added lookahead (?=) to stop before "SCAN DATE" or newline
+    grade_match = re.search(r'OVERALL GRADE\s+(.*?)(?=\s*SCAN DATE|\n)', clean_text)
+    if grade_match:
+        report_data["metadata"]["grade"] = grade_match.group(1).strip()
 
-            # Attempt a split-based approach for reliability since the columns are fixed
-            parts = clean_line.split()
+    # --- 3. Extract Server Configuration [FIXED] ---
+    # Looks for specific known keys and stops capturing when it hits another key
+    
+    config_keys = ["TLS Compression", "Secure Renegotiation", "OCSP Stapling", "Fallback SCSV"]
+
+    def extract_config(target_key, text):
+        # Build regex: Target Key -> capture -> Stop at (Next Key OR Newline)
+        other_keys = "|".join([k for k in config_keys if k != target_key])
+        pattern = rf'{target_key}\s+(.*?)(?=\s+(?:{other_keys})|\n|$)'
+        
+        match = re.search(pattern, text, re.IGNORECASE)
+        if match:
+            return match.group(1).strip()
+        return None
+
+    report_data["server_configuration"] = {
+        "tls_compression": extract_config("TLS Compression", clean_text),
+        "secure_renegotiation": extract_config("Secure Renegotiation", clean_text),
+        "ocsp_stapling": extract_config("OCSP Stapling", clean_text),
+        "fallback_scsv": extract_config("Fallback SCSV", clean_text)
+    }
+
+    # --- 4. Extract Vulnerabilities ---
+    # Pattern: [Name] [Severity] \n DESCRIPTION [Text]
+    vuln_iter = re.finditer(
+        r'(?P<name>[^\n]+)\s+(?P<sev>MEDIUM|HIGH|LOW|CRITICAL)\s+SEVERITY\s+'
+        r'DESCRIPTION\s+(?P<desc>[^\n]+)', 
+        clean_text
+    )
+    
+    for v in vuln_iter:
+        if "VULNERABILITY FINDINGS" in v.group('name'):
+            continue
             
-            # Expected format: [Protocol] [Cipher Name (1 or more words)] [Bits] [Status]
-            if len(parts) >= 4:
-                # The bits and status are always the last two items
-                status = parts[-1]
-                bits_str = parts[-2]
-                
-                # FIX: Use try-except to safely convert 'bits' to an integer,
-                # skipping lines (like the header "Bits") that fail conversion.
-                try:
-                    bits = int(bits_str)
-                except ValueError:
-                    continue
-                
-                protocol = parts[0]
-                # The cipher name is everything in between
-                cipher_name = " ".join(parts[1:-2]) 
-                
-                report_data["supported_ciphers"].append({
-                    "protocol": protocol.strip(),
-                    "name": cipher_name.strip(),
-                    "bits": bits,
-                    "status": status.strip().lower()
-                })
-            
+        report_data["vulnerabilities"].append({
+            "name": v.group('name').strip(),
+            "severity": v.group('sev').strip(),
+            "description": v.group('desc').strip()
+        })
+
+    # --- 5. Extract Protocols and Ciphers (State Machine Approach) ---
+    lines = clean_text.split('\n')
+    current_protocol = None
+    
+    # Regex to identify a Protocol Header line (e.g., "TLSv1.3 2 CIPHERS")
+    proto_header_regex = re.compile(r'^(TLSv\d\.\d+(?:\s+\(Deprecated\))?)\s+\d+\s+CIPHERS', re.IGNORECASE)
+    
+    # Regex to identify a Cipher Data line (e.g., "AES256-SHA 256 bits ACCEPTED")
+    cipher_line_regex = re.compile(r'^([A-Z0-9_-]+)\s+(\d+)\s+bits\s+(ACCEPTED|REJECTED)', re.IGNORECASE)
+
+    for line in lines:
+        line = line.strip()
+        if not line: 
+            continue
+
+        p_match = proto_header_regex.match(line)
+        if p_match:
+            current_protocol = p_match.group(1)
+            report_data["protocols"][current_protocol] = []
+            continue
+
+        c_match = cipher_line_regex.match(line)
+        if c_match and current_protocol:
+            report_data["protocols"][current_protocol].append({
+                "cipher": c_match.group(1),
+                "bits": int(c_match.group(2)),
+                "status": c_match.group(3)
+            })
+
+    # --- 6. Extract Certificate Details [FIXED] ---
+    # Expiry
+    cert_expiry = re.search(r'Leaf Certificate Expires:\s*(\d{4}-\d{2}-\d{2})', clean_text)
+    if cert_expiry:
+        report_data["certificate_chain"]["leaf_expiry"] = cert_expiry.group(1)
+
+    # Subject / Common Name
+    subject_match = re.search(r'Subject / Common Name\s+(.*?)(?=Issuer)', clean_text, re.IGNORECASE)
+    if subject_match:
+        report_data["certificate_chain"]["subject"] = subject_match.group(1).strip()
+
+    # Issuer [FIXED]
+    # Changed \s+ to \s* to handle merged text "comIssuer"
+    issuer_match = re.search(r'Issuer\s*(.*?)(?=\s*Signature Algorithm|\n)', clean_text, re.IGNORECASE)
+    if issuer_match:
+        val = issuer_match.group(1).strip()
+        if val:
+            report_data["certificate_chain"]["issuer"] = val
+        
+    # Signature Algorithm
+    sig_match = re.search(r'Signature Algorithm\s+(.*?)(?=Key Type)', clean_text, re.IGNORECASE)
+    if sig_match:
+        report_data["certificate_chain"]["signature_algorithm"] = sig_match.group(1).strip()
+
+    # Key Type [ADDED]
+    key_match = re.search(r'Key Type\s*(.*?)(?=\s+NETSHIELDAI|\n|$)', clean_text, re.IGNORECASE)
+    if key_match:
+        report_data["certificate_chain"]["key_type"] = key_match.group(1).strip()
 
     return report_data
 
@@ -215,7 +168,7 @@ def process_sslscan_report_file(file_path: str) -> Dict[str, Any]:
     if not os.path.exists(file_path):
         raise FileNotFoundError(f"SSLScan report not found: {file_path}")
 
-    print(f"Processing SSLScan report: {file_path}")
+    logger.info(f"Processing SSLScan report: {file_path}")
 
     try:
         raw_text = extract_text_from_pdf(file_path)
@@ -235,7 +188,7 @@ def process_sslscan_report_file(file_path: str) -> Dict[str, Any]:
         return report_data
 
     except Exception as e:
-        print(f"Error processing SSLScan report {file_path}: {str(e)}")
+        logger.error(f"Error processing SSLScan report {file_path}: {str(e)}")
         raise
 
 if __name__ == "__main__":

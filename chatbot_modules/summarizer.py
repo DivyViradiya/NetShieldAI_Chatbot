@@ -5,6 +5,10 @@ import sys
 import dotenv
 import uuid
 import re
+import logging
+
+# Initialize module logger
+logger = logging.getLogger(__name__)
 
 # Load environment variables from a .env file (if present)
 dotenv.load_dotenv()
@@ -16,287 +20,591 @@ if project_root not in sys.path:
 
 from chatbot_modules import config 
 
-# --- Main Router Function ---
 def _format_nmap_summary_prompt(parsed_data: Dict[str, Any]) -> str:
     """
-    Crafts a detailed prompt for an LLM to analyze parsed Nmap data,
-    ensuring a structured, professional, and actionable final summary.
+    Crafts a detailed prompt for an LLM to analyze parsed NetShieldAI (Nmap) data,
+    generating a professional report with markdown tables and remediation steps.
     """
     
-    # --- LLM Instructions ---
-    prompt = (
-        "You are a **senior network security consultant** drafting an executive briefing for a Network Operations Team. "
-        "Your goal is to provide a clear analysis and actionable steps based on the Nmap scan results below.\n"
-        "Based *only* on the data provided within the '--- Nmap Report Data ---' block, you must complete the following four sections:\n"
-        "1.  **Executive Summary**: Write a concise, non-technical summary of the scan. State the target, the host status, the total number of open ports found, and the key network services exposed (e.g., SMB/CIFS, RPC).\n"
-        "2.  **Scan Analysis**: Detail the **type of scan** performed (e.g., Aggressive, SYN Scan) and explain the implications of the Host Status (e.g., 'Up' means the host is active and responsive).\n"
-        "3.  **High-Risk Service Review**: List every **Open** port. For services like **135, 139, 445 (RPC, NetBIOS, SMB/CIFS)**, explain the **vulnerability exposure** (e.g., potential for lateral movement, credential harvesting, or exploitation of protocol vulnerabilities).\n"
-        "4.  **Remediation Steps**: Provide practical, actionable remediation steps for securing the network services exposed. **Group recommendations by action (e.g., Firewalling, Patching, Configuration)**.\n\n"
-        
-        "Format your response using clear headings: 'Executive Summary', 'Scan Analysis', 'High-Risk Service Review', and 'Remediation Steps'.\n\n"
-        "--- Nmap Report Data ---\n\n"
-    )
-
-    # --- Metadata Section ---
+    # --- 1. Extract Data from New JSON Structure ---
     metadata = parsed_data.get("scan_metadata", {})
-    target_ip = metadata.get('target_ip', 'N/A')
-    host_status = metadata.get('host_status', 'N/A')
-    scan_args = metadata.get('scan_arguments', '')
+    summary = parsed_data.get("summary", {})
+    ports = parsed_data.get("open_ports", [])
     
-    # Determine the Scan Type (Logic moved inline)
+    target_ip = metadata.get('target_ip', 'N/A')
+    scan_args = metadata.get('scan_arguments', '')
+    scan_date = metadata.get('scan_date', 'N/A')
+    security_posture = metadata.get('security_posture', 'Unknown')
+    
+    ports_found_count = summary.get("ports_found", 0)
+    threats_detected = summary.get("threats_detected", 0)
+
+    # --- 2. Determine Scan Type Logic ---
     args_lower = scan_args.lower()
     if "-a" in args_lower:
-        scan_type = "Aggressive Scan (-A) - Includes OS/Version/Scripting/Traceroute"
+        scan_type = "Aggressive Scan (-A) - OS/Version/Scripting"
     elif "-sv" in args_lower:
         scan_type = "Service Version Detection (-sV)"
+    elif "--script vuln" in args_lower:
+        scan_type = "Vulnerability Scan (--script vuln)"
     elif "-ss" in args_lower:
         scan_type = "TCP SYN Scan (Stealth) (-sS)"
-    elif "-st" in args_lower:
-        scan_type = "TCP Connect Scan (-sT)"
-    elif "-sn" in args_lower or "-sp" in args_lower:
-        scan_type = "Ping Scan (Host Discovery)"
-    elif "-sN" in args_lower or "-sF" in args_lower or "-sX" in args_lower:
-        scan_type = "Stealth/FIN/Xmas Scans"
     else:
         scan_type = "Standard TCP/Port Scan"
 
+    # --- 3. Construct the LLM System Instructions ---
+    prompt = (
+        "You are **NetShieldAI's Senior Network Security Consultant**.\n"
+        "Your task is to analyze the following Nmap scan data and generate a professional 'Network Assessment Briefing' for the user.\n\n"
+        
+        "### Guidelines:\n"
+        "1. **Persona**: Be authoritative but accessible. Translate technical findings into real-world risk.\n"
+        "2. **Format**: Use clean Markdown. Do not output raw JSON.\n"
+        "3. **Data Source**: Use *only* the data provided in the '--- SCAN DATA ---' block below.\n\n"
+        
+        "### Required Report Structure:\n\n"
+        
+        "#### 1. Executive Summary\n"
+        "   - Give a 2-3 sentence 'Bottom Line Up Front' verdict.\n"
+        "   - Explicitly state if the network is **Secure**, **At Risk**, or **Critical**.\n"
+        "   - Mention the total open ports and the specific Security Posture verdict from the tool.\n\n"
+        
+        "#### 2. Network Fingerprint (Table)\n"
+        "   - Create a **Markdown Table** with the following columns:\n"
+        "     - **Port / Protocol** (e.g., 80/TCP)\n"
+        "     - **Service Name** (e.g., HTTP / lighttpd)\n"
+        "     - **Function** (A brief, plain-English explanation of what this service does)\n"
+        "     - **Risk Assessment** (e.g., 'Low - Standard Web Port', 'Medium - Unencrypted', 'High - Known Vulnerability')\n\n"
+        
+        "#### 3. Deep Dive Analysis\n"
+        "   - Select the top 2-3 most notable findings (e.g., UPnP, Non-standard ports like 7443).\n"
+        "   - Explain *why* these might be open (e.g., 'Port 1900 is often used for media streaming discovery...').\n"
+        "   - If 'Threats Detected' > 0, prioritize those vulnerabilities.\n\n"
+        
+        "#### 4. Remediation & Hardening\n"
+        "   - Provide 3 bullet points of actionable advice.\n"
+        "   - Focus on reducing the attack surface (e.g., 'Disable UPnP if not needed', 'Ensure the router firmware is updated').\n\n"
+        
+        "--- SCAN DATA ---\n"
+    )
 
-    prompt += "## Scan Metadata\n"
-    prompt += f"- **Target IP**: {target_ip}\n"
-    prompt += f"- **Host Status**: {host_status}\n"
-    prompt += f"- **Scan Date**: {metadata.get('scan_date', 'N/A')}\n"
-    
-    # Include the determined Scan Type
-    prompt += f"- **Scan Type**: {scan_type}\n"
-    prompt += f"- **Full Arguments**: {scan_args}\n\n"
-
-    # --- Summary and Port Counts ---
-    summary = parsed_data.get("summary", {})
-    open_ports_count = summary.get("open_ports_count", 0)
-    
-    prompt += "## Open Port Summary\n"
-    prompt += f"- **Total Open Ports Detected**: {open_ports_count}\n\n"
-    
-    # --- Detailed Port Findings ---
-    ports = parsed_data.get("open_ports", [])
+    # --- 4. Inject Formatted Data Block ---
+    prompt += f"Target Node: {target_ip}\n"
+    prompt += f"Scan Date: {scan_date}\n"
+    prompt += f"Scan Type: {scan_type}\n"
+    prompt += f"Security Posture Verdict: {security_posture}\n"
+    prompt += f"Threats Detected: {threats_detected}\n"
+    prompt += f"Total Open Ports: {ports_found_count}\n\n"
 
     if ports:
-        prompt += "## Detailed Open Port Findings\n"
-        for i, port_data in enumerate(ports, 1):
-            prompt += f"### {i}. Port {port_data.get('port', 'N/A')} / {port_data.get('protocol', 'N/A')}\n"
-            prompt += f"- **Service**: {port_data.get('service_name', 'N/A')}\n"
-            prompt += f"- **Version**: {port_data.get('service_version', 'N/A')}\n"
-            prompt += f"- **State**: {port_data.get('state', 'N/A')}\n"
-            prompt += f"- **Local Process**: {port_data.get('local_process', 'N/A')}\n\n"
+        prompt += "### Open Ports Details:\n"
+        for p in ports:
+            # Handle cases where version might be same as name to avoid redundancy in text
+            version_info = p.get('service_version', 'N/A')
+            if version_info == p.get('service_name'):
+                display_version = "Same as Service Name" 
+            else:
+                display_version = version_info
+
+            prompt += (
+                f"- Port {p.get('port')}/{p.get('protocol')} ({p.get('state')}): "
+                f"Service='{p.get('service_name')}', "
+                f"Version='{display_version}', "
+                f"Process='{p.get('local_process')}'\n"
+            )
     else:
-        prompt += "## Detailed Open Port Findings\n\nNo open ports were detected on the target.\n\n"
+        prompt += "No open ports were detected.\n"
 
+    prompt += "\n--- END OF SCAN DATA ---\n"
+    
+    return prompt
 
-    prompt += "--- End of Report Data ---\n"
+def _format_traffic_analysis_prompt(parsed_data: Dict[str, Any]) -> str:
+    """
+    Crafts a prompt for an LLM to analyze TShark network traffic data,
+    focusing on bandwidth usage, protocol distribution, and external connections.
+    """
+    
+    # --- 1. Extract Core Data ---
+    metadata = parsed_data.get("scan_metadata", {})
+    metrics = parsed_data.get("traffic_metrics", {})
+    protocols = parsed_data.get("protocol_hierarchy", [])
+    conversations = parsed_data.get("active_conversations", [])
+    security_insights = parsed_data.get("security_insights", "N/A")
+
+    target_node = metadata.get('target_node', 'N/A')
+    duration = metrics.get('duration_sec', 0)
+    volume = metrics.get('data_volume', 'N/A')
+
+    # --- 2. Construct LLM Instructions ---
+    prompt = (
+        "You are **NetShieldAI's Senior Network Traffic Analyst**.\n"
+        "Your task is to analyze the following packet capture summary and generate a 'Traffic Inspection Briefing'.\n\n"
+        
+        "### Guidelines:\n"
+        "1. **Objective**: Identify what the target device was doing during the capture window (e.g., browsing, streaming, idle).\n"
+        "2. **Focus**: Highlight encrypted vs. unencrypted traffic and external vs. internal connections.\n"
+        "3. **Format**: Use clean Markdown with tables.\n\n"
+        
+        "### Required Report Structure:\n\n"
+        
+        "#### 1. Traffic Snapshot\n"
+        "   - Summarize the capture duration, data volume, and general throughput.\n"
+        "   - Give a verdict on whether this looks like 'High Load' or 'Background Activity' based on the throughput.\n\n"
+        
+        "#### 2. Protocol Composition (Table)\n"
+        "   - Create a **Markdown Table** with columns: **Protocol**, **Frame Count**, **Bytes**, **% of Traffic** (Estimate based on bytes).\n"
+        "   - Briefly explain what the dominant protocol indicates (e.g., 'High TLS indicates secure web browsing').\n\n"
+        
+        "#### 3. Connection Analysis\n"
+        "   - Analyze the 'Active Conversations'.\n"
+        "   - Identify any **External IPs** (Public Internet) vs **Internal IPs** (Local Network).\n"
+        "   - Flag any suspicious destination ports (standard are 80/443; others might be interesting).\n\n"
+        
+        "#### 4. Automated Security Insights\n"
+        "   - State the automated tool's verdict found in the report.\n"
+        "   - Add your own observation: Is the presence of unencrypted traffic (HTTP/DNS) a concern?\n\n"
+        
+        "--- PACKET CAPTURE DATA ---\n"
+    )
+
+    # --- 3. Inject Data ---
+    prompt += f"Target Node: {target_node}\n"
+    prompt += f"Capture Duration: {duration} seconds\n"
+    prompt += f"Total Data Volume: {volume}\n"
+    prompt += f"Throughput: {metrics.get('throughput', 'N/A')}\n"
+    prompt += f"Automated Verdict: {security_insights}\n\n"
+
+    # Protocol Block
+    prompt += "### Protocol Hierarchy (Top Layers):\n"
+    if protocols:
+        # Filter out 'frame', 'eth', 'ip' usually to save tokens, or keep them if deep analysis needed.
+        # Here we include them all but you might want to filter in production.
+        for p in protocols:
+            prompt += f"- {p['protocol'].upper()}: {p['frames']} frames, {p['bytes']} bytes\n"
+    else:
+        prompt += "No protocol data available.\n"
+
+    # Conversation Block
+    prompt += "\n### Active Conversations (Sample):\n"
+    if conversations:
+        for c in conversations:
+            prompt += f"- {c['src_ip']}:{c['src_port']} <--> {c['dst_ip']}:{c['dst_port']}\n"
+    else:
+        prompt += "No conversation data available.\n"
+
+    prompt += "\n--- END OF CAPTURE DATA ---\n"
     
     return prompt
 
 
 def _format_zap_summary_prompt(parsed_data: Dict[str, Any]) -> str:
     """
-    Crafts a highly optimized and detailed prompt for an LLM to analyze parsed ZAP data,
-    ensuring a structured, professional, and actionable final summary.
+    Constructs a detailed prompt for an LLM to analyze ZAP scan data.
+    
+    Design Goals:
+    1. Educational Tone: Explains *why* vulnerabilities matter in plain English.
+    2. Table-Centric: Forces the output into structured tables for readability.
+    3. Action-Oriented: Focuses on specific remediation steps.
+    4. No Images: Strictly text and tables only.
     """
     
-    # --- LLM Instructions ---
+    # --- 1. LLM Persona and Constraints ---
     prompt = (
-        "You are a **senior cybersecurity consultant** drafting an executive briefing for a development team. "
-        "Your goal is to provide a clear analysis and actionable steps based on the ZAP scan results below.\n"
-        "Based *only* on the data provided within the '--- ZAP Report Data ---' block, you must complete the following four sections:\n"
-        "1.  **Executive Summary**: Write a concise, non-technical summary of the scan results. State the target, the **overall risk posture** (e.g., Moderate Risk), and the most critical security category exposed (e.g., Missing Security Headers).\n"
-        "2.  **Key Findings**: Detail all **High and Medium risk** vulnerabilities. For each, clearly state the **CWE ID** (if available) and explain the **potential business impact** (e.g., session hijacking, data leakage) on the application.\n"
-        "3.  **Remediation Steps**: Provide practical, actionable remediation steps for each High and Medium risk finding. **Structure these steps using bullet points, grouped by Phase (Architecture, Implementation, etc.)** as provided in the Solution section.\n"
-        "4.  **Low-Priority Context**: Briefly summarize the general themes (e.g., 'Information Leakage', 'Missing Security Controls') found in the Low and Informational alerts.\n\n"
+        "You are **NetShieldAI's Senior Web Application Security Consultant**.\n"
+        "Your goal is to explain the provided OWASP ZAP scan results clearly, comprehensively, and professionally.\n\n"
         
-        "Format your response using clear headings: 'Executive Summary', 'Key Findings', and 'Remediation Steps'.\n\n"
-        "--- ZAP Report Data ---\n\n"
+        "### STRICT OUTPUT GUIDELINES:\n"
+        "1. **NO IMAGES**: Do not include any images, diagrams, or placeholders for images.\n"
+        "2. **USE TABLES**: You must use Markdown tables to organize the Executive Summary and the Remediation Checklist.\n"
+        "3. **EDUCATIONAL TONE**: For every high/medium risk, explain the concept simply (as if to a junior developer) before providing the technical fix.\n"
+        "4. **STRUCTURE**: Your response must follow the exact structure defined below.\n\n"
+        
+        "### REQUIRED RESPONSE STRUCTURE:\n"
+        "**1. Executive Summary Table**\n"
+        "   - Create a table with columns: [Scan Target, Scan Date, High Risks, Medium Risks, Low/Info Risks, Overall Status].\n\n"
+        
+        "**2. Critical Vulnerability Analysis (High & Medium Only)**\n"
+        "   - For each finding, provide:\n"
+        "     - **Vulnerability Name & Risk Level**\n"
+        "     - **The 'Plain English' Explanation**: What is this vulnerability? (Explain concepts like SQLi or XSS simply).\n"
+        "     - **Business Impact**: Why should the business care? (e.g., data theft, reputation loss).\n"
+        "     - **Technical Details**: The specific URL/Parameter affected.\n"
+        "     - **Technical Solution**: Specific code-level advice.\n\n"
+        
+        "**3. Prioritized Remediation Checklist (Table)**\n"
+        "   - Create a table with columns: [Priority, Action Item, Affected Component, Difficulty].\n"
+        "   - Rank the actions from most critical to least critical.\n\n"
+        
+        "**4. Low Risk & Best Practices**\n"
+        "   - A bulleted summary of low-risk issues (e.g., headers, banners) that should be fixed for defense-in-depth.\n\n"
+        
+        "--- START OF ZAP RAW DATA ---\n"
     )
 
-    # --- Metadata Section ---
+    # --- 2. Inject Metadata ---
     metadata = parsed_data.get("scan_metadata", {})
-    target_url = metadata.get('target_url', 'N/A')
-    tool_info = metadata.get('tool', 'ZAP Scanner')
+    prompt += f"## META INFORMATION\n"
+    # Provide defaults to prevent errors if keys are missing
+    prompt += f"Target URL: {metadata.get('target_url', 'N/A (See URLs in findings)')}\n"
+    prompt += f"Generated At: {metadata.get('generated_at', 'N/A')}\n"
+    prompt += f"Tool: {metadata.get('tool', 'ZAP Scanner')}\n\n"
 
-    prompt += "## Scan Metadata\n"
-    prompt += f"- **Target Site**: {target_url}\n"
-    prompt += f"- **Generated At**: {metadata.get('generated_at', 'N/A')}\n"
-    prompt += f"- **Scan Tool/Version**: {tool_info}\n\n"
-
-    # --- Summary Risk Counts & Inconsistency Note ---
-    summary = parsed_data.get("summary", {})
-    risk_counts = summary.get("risk_counts", {})
+    # --- 3. Inject Risk Summary ---
+    # FIXED: JSON uses 'alert_summary'
+    risk_counts = parsed_data.get("alert_summary", {})
     
-    prompt += "## Risk Distribution Summary\n"
+    prompt += "## RISK COUNT SUMMARY\n"
     for risk_level, count in risk_counts.items():
-        prompt += f"- **{risk_level}**: {count} alerts\n"
-    prompt += f"- **Total Alerts (Report Summary)**: {summary.get('total_alerts', 0)}\n"
+        if risk_level != "Total":  # Optional: skip 'Total' if you only want specific risks
+            prompt += f"- {risk_level}: {count}\n"
+    prompt += "\n"
+
+    # --- 4. Inject Detailed Vulnerabilities ---
+    # FIXED: JSON uses 'findings', not 'vulnerabilities'
+    vulnerabilities = parsed_data.get("findings", [])
     
-    # Add note about common summary table inconsistency
-    prompt += "> **Note**: The detailed vulnerability list contains {len(parsed_data.get('vulnerabilities', []))} unique findings, including Informational alerts, which may exceed the 'Total Alerts' count.\n\n"
+    # FIXED: JSON uses 'risk_level' (Upper Case). Code logic updated to handle this safely.
+    high_medium_vulns = [
+        v for v in vulnerabilities 
+        if v.get("risk_level", "").upper() in ["HIGH", "MEDIUM"]
+    ]
+    
+    # FIXED: Added 'INFO' to list since your JSON has 'Info' count
+    low_info_vulns = [
+        v for v in vulnerabilities 
+        if v.get("risk_level", "").upper() in ["LOW", "INFO", "INFORMATIONAL"]
+    ]
 
-    # --- Alerts by Type and Prevalence ---
-    alerts_by_name = summary.get("alerts_by_name", [])
-    if alerts_by_name:
-        prompt += "## Alerts by Type and Prevalence\n"
-        for alert in alerts_by_name:
-            prompt += f"- **{alert.get('name', 'N/A')}** (**{alert.get('risk_level', 'N/A')}**): {alert.get('instances_count', 0)} Instances\n"
-        prompt += "\n"
-
-    # --- Detailed High and Medium Risk Vulnerabilities ---
-    vulnerabilities = parsed_data.get("vulnerabilities", [])
-    high_medium_vulnerabilities = [v for v in vulnerabilities if v.get("risk") in ["High", "Medium"]]
-    low_info_vulnerabilities = [v for v in vulnerabilities if v.get("risk") in ["Low", "Informational"]]
-
-    if high_medium_vulnerabilities:
-        prompt += "## Detailed High and Medium Risk Vulnerabilities\n\n"
-        for i, vuln in enumerate(high_medium_vulnerabilities, 1):
-            prompt += f"### {i}. {vuln.get('name', 'N/A')}\n"
-            prompt += f"- **Risk Level**: {vuln.get('risk', 'N/A')}\n"
-            
-            # Include CWE ID for deeper context
-            cwe_id = vuln.get('cwe_id')
-            prompt += f"- **CWE ID**: {cwe_id if cwe_id else 'N/A'}\n"
-            
-            prompt += f"- **Affected URL**: {vuln.get('url', 'N/A')}\n"
-            prompt += f"- **Description**: {vuln.get('description', 'N/A')}\n"
-            
-            # --- Formatted Solution for LLM Remediation ---
-            # Pre-format the solution into a clean, parseable list for the LLM
-            solution_text = vuln.get('solution', 'N/A')
-            
-            # Use regex to find and group solutions by Phase header if present (e.g., 'Phase: Architecture')
-            solution_groups = re.findall(r"(Phase: [^\n]+)(.*?)(?=Phase: |Reference:|\Z)", solution_text, re.DOTALL)
-            
-            if solution_groups:
-                prompt += "- **Remediation Details (by Phase)**:\n"
-                for phase, details in solution_groups:
-                    phase = phase.strip()
-                    details = details.strip()
-                    # Clean the details and present as bullet points
-                    clean_details = [line.strip() for line in details.split('\n') if line.strip()]
-                    
-                    # Ensure the Phase header is bolded for the LLM to structure by
-                    prompt += f"  - **{phase}**:\n"
-                    for detail in clean_details:
-                        # Convert asterisks/dashes to clean bullet points
-                        detail = re.sub(r'^\s*[\*\-]', '', detail).strip()
-                        prompt += f"    - {detail}\n"
-            else:
-                # Fallback to presenting the solution as a single block if phases aren't found
-                prompt += f"- **Raw Solution**: {solution_text}\n"
-
-            prompt += "\n"
+    # A. High & Medium Detail Block
+    if high_medium_vulns:
+        prompt += "## HIGH & MEDIUM RISK FINDINGS (Detailed)\n"
+        for i, vuln in enumerate(high_medium_vulns, 1):
+            prompt += f"--- FINDING #{i} ---\n"
+            prompt += f"Name: {vuln.get('name', 'N/A')}\n"
+            prompt += f"Risk Level: {vuln.get('risk_level', 'N/A')}\n"
+            # Removed CWE ID check as it is not in your JSON snippet
+            prompt += f"Affected URL: {vuln.get('url', 'N/A')}\n"
+            prompt += f"Description: {vuln.get('description', 'N/A')}\n"
+            prompt += f"Suggested Solution: {vuln.get('solution', 'N/A')}\n\n"
     else:
-        prompt += "## Detailed High and Medium Risk Vulnerabilities\n\nNo High or Medium risk vulnerabilities were identified.\n\n"
+        prompt += "## HIGH & MEDIUM RISK FINDINGS\nNo critical vulnerabilities found.\n\n"
 
-    # --- Low Risk & Informational Findings ---
-    if low_info_vulnerabilities:
-        prompt += "## Low Risk & Informational Findings\n"
-        prompt += "The following low-risk and informational issues were noted:\n"
-        unique_low_info_names = sorted(list(set(v.get('name', 'N/A') for v in low_info_vulnerabilities)))
-        for name in unique_low_info_names:
-            # Include risk level for context
-            risk = next(v.get('risk') for v in low_info_vulnerabilities if v.get('name') == name)
-            prompt += f"- **{name}** ({risk})\n"
+    # B. Low & Info List Block
+    if low_info_vulns:
+        prompt += "## LOW & INFORMATIONAL FINDINGS (List)\n"
+        unique_lows = set()
+        for v in low_info_vulns:
+            name = v.get('name', 'N/A')
+            risk = v.get('risk_level', 'N/A')
+            
+            # Avoid duplicates in the summary list
+            if name not in unique_lows:
+                prompt += f"- {name} ({risk})\n"
+                unique_lows.add(name)
         prompt += "\n"
 
-    prompt += "--- End of Report Data ---\n"
+    prompt += "--- END OF ZAP RAW DATA ---\n"
     
     return prompt
 
 def _format_sslscan_summary_prompt(parsed_data: Dict[str, Any]) -> str:
     """
-    Crafts a detailed, targeted prompt for the LLM based on SSLScan parsed data
-    (NetShieldAI format). Focuses on mandatory analysis points: vulnerabilities, 
-    protocols, ciphers, and certificate health.
-
-    Args:
-        parsed_data (Dict[str, Any]): The structured dictionary from the parser.
-
-    Returns:
-        str: A detailed prompt ready for the LLM.
+    Crafts a detailed, targeted prompt for the LLM based on SSLScan parsed data.
+    
+    Adapts to the "Assessment" JSON structure (nested protocols/ciphers).
     """
+    
+    # 1. Extract Helper Variables
+    meta = parsed_data.get("metadata", {})
+    cert = parsed_data.get("certificate_chain", {})
+    config = parsed_data.get("server_configuration", {})
+    vulns = parsed_data.get("vulnerabilities", [])
+    protocols_dict = parsed_data.get("protocols", {})
+
+    # 2. Identify Weak Ciphers (Logic: <128 bits or "DES/RC4" in name)
+    weak_ciphers = []
+    active_protocols = []
+    
+    for proto, ciphers in protocols_dict.items():
+        active_protocols.append(proto)
+        for c in ciphers:
+            name = c.get("cipher", "")
+            bits = c.get("bits", 0)
+            if bits < 128 or "DES" in name or "RC4" in name or "MD5" in name:
+                weak_ciphers.append(f"{proto}: {name} ({bits} bits)")
+
+    # 3. Construct the Prompt
     prompt = (
-        "As a senior cybersecurity analyst, analyze the following SSL/TLS "
-        "Vulnerability Scan Report and provide a comprehensive, actionable assessment.\n"
-        "The analysis must strictly adhere to the data provided below and be organized "
-        "under the specified headings. Pay special attention to Medium or High severity findings.\n\n"
-        "--- SSLScan Report Analysis Requirements ---\n"
-        "1. **Concise Summary:** An overview of the target, scan date, and overall security posture.\n"
-        "2. **Key Findings (Categorized):** List all vulnerabilities (Medium/High priority) and deviations from best practices (e.g., weak protocols, ciphers).\n"
-        "3. **Implications:** Explain the direct security risk of each key finding (e.g., data interception, downgrade attacks).\n"
-        "4. **Remediation Steps:** Provide clear, prioritized, and technical remediation actions.\n"
-        "--- End Requirements ---\n\n"
-        "--- SSLScan Report Data ---\n"
+        "As a Netshield's Senior Cybersecurity Analyst, analyze the following SSL/TLS "
+        "Assessment Report data and provide a professional security audit.\n\n"
+        
+        "### ANALYSIS REQUIREMENTS\n"
+        "You must organize your response into the following sections. "
+        "**Use Markdown Tables** for clear data presentation where requested.\n\n"
+        
+        "1. **Executive Summary:**\n"
+        "   - Provide a high-level status of the target (Secure, At Risk, or Critical).\n"
+        "   - Mention the Overall Grade if available.\n\n"
+        
+        "2. **Critical Vulnerabilities (Table Required):**\n"
+        "   - Create a table with columns: [Severity, Vulnerability Name, Impact].\n"
+        "   - List all Medium/High severity findings found in the data.\n\n"
+        
+        "3. **Protocol & Cipher Analysis (Table Required):**\n"
+        "   - Create a table with columns: [Protocol Version, Status, Remediation].\n"
+        "   - specifically flag deprecated protocols (TLS 1.0, 1.1) as 'Risky'.\n"
+        "   - Highlight any weak ciphers (e.g., DES, RC4) detected.\n\n"
+        
+        "4. **Configuration & Certificate Health:**\n"
+        "   - Review server flags (Compression, Renegotiation).\n"
+        "   - Review Certificate validity and Signature Algorithm.\n\n"
+        
+        "5. **Remediation Plan:**\n"
+        "   - Provide a numbered list of technical steps to fix the issues.\n"
+        "   - specific config commands or strategy (e.g., 'Disable TLS 1.0').\n\n"
+        
+        "--- START REPORT DATA ---\n"
     )
 
-    # 1. Scan Metadata (Streamlined)
-    metadata = parsed_data.get("scan_metadata", {})
-    prompt += f"Target Host: {metadata.get('target_host', 'N/A')}\n"
-    prompt += f"Port: {metadata.get('port', 'N/A')}\n"
-    prompt += f"Scan Date: {metadata.get('scan_date', 'N/A')}\n\n"
+    # --- Inject Data ---
 
-    # 2. Detected Vulnerabilities (CRITICAL SECTION ADDED)
-    vulnerabilities = parsed_data.get("vulnerabilities", [])
-    if vulnerabilities:
-        prompt += "Vulnerabilities Found:\n"
-        for vuln in vulnerabilities:
-            prompt += f" - [{vuln.get('severity', 'N/A')}] {vuln.get('description', 'N/A')}\n"
+    # Metadata
+    prompt += f"Target: {meta.get('target', 'Unknown')}\n"
+    prompt += f"Scan Date: {meta.get('scan_date', 'Unknown')}\n"
+    prompt += f"Overall Grade: {meta.get('grade', 'N/A')}\n\n"
+
+    # Vulnerabilities
+    if vulns:
+        prompt += "DETECTED VULNERABILITIES:\n"
+        for v in vulns:
+            prompt += f"- [{v.get('severity')}] {v.get('name')}: {v.get('description')}\n"
     else:
-        prompt += "Vulnerabilities Found: None explicitly listed (beyond cipher acceptance list).\n"
+        prompt += "DETECTED VULNERABILITIES: None explicitly listed.\n"
 
-    # 3. Protocols
-    protocols = parsed_data.get("protocols", [])
-    if protocols:
-        prompt += "\nEnabled/Disabled Protocols:\n"
-        for proto in protocols:
-            prompt += f" - {proto.get('name', 'N/A')}: {proto.get('status', 'N/A')}\n"
+    # Weak Ciphers (Pre-calculated)
+    if weak_ciphers:
+        prompt += "\nWEAK CIPHERS DETECTED:\n"
+        for wc in weak_ciphers:
+            prompt += f"- {wc}\n"
+    else:
+        prompt += "\nWEAK CIPHERS DETECTED: None (<128 bits).\n"
+
+    # Active Protocols List
+    prompt += f"\nACTIVE PROTOCOLS:\n- {', '.join(active_protocols)}\n"
+
+    # Server Configuration
+    if config:
+        prompt += "\nSERVER CONFIGURATION:\n"
+        for k, v in config.items():
+            prompt += f"- {k}: {v}\n"
+
+    # Certificate Chain
+    prompt += "\nCERTIFICATE DETAILS:\n"
+    prompt += f"- Subject: {cert.get('subject', 'N/A')}\n"
+    prompt += f"- Issuer: {cert.get('issuer', 'N/A')}\n"
+    prompt += f"- Expiry: {cert.get('leaf_expiry', 'N/A')}\n"
+    prompt += f"- Sig Algo: {cert.get('signature_algorithm', 'N/A')}\n"
+    prompt += f"- Key: {cert.get('key_type', 'N/A')}\n"
+
+    prompt += "--- END REPORT DATA ---\n\n"
+    prompt += "Please generate the assessment now, ensuring tables are used for the vulnerability and protocol sections."
+
+    return prompt
+
+def _format_sql_summary_prompt(parsed_data: Dict[str, Any]) -> str:
+    """
+    Crafts a detailed, targeted prompt for the LLM based on SQL Injection parsed data.
     
-    # 4. Server Configuration (Security Features)
-    # Using the populated 'server_configuration' field from the parser
-    server_config = parsed_data.get("server_configuration", {})
-    if server_config:
-        prompt += "\nServer Configuration & Security Features:\n"
-        for feature, status in server_config.items():
-            prompt += f" - {feature.replace('_', ' ').title()}: {status}\n"
+    Adapts to the "NetShieldAI SQL Audit" JSON structure.
+    """
+    
+    # 1. Extract Helper Variables
+    meta = parsed_data.get("metadata", {})
+    counts = parsed_data.get("summary_counts", {})
+    fingerprint = parsed_data.get("database_fingerprint", {})
+    vulns = parsed_data.get("vulnerabilities", [])
 
-    # 5. Supported Ciphers (Focusing on Weakness)
-    ciphers = parsed_data.get("supported_ciphers", [])
-    if ciphers:
-        prompt += "\nSupported Server Ciphers:\n"
-        weak_ciphers = [
-            f"{c.get('name')} ({c.get('bits')} bits) on {c.get('protocol')}" 
-            for c in ciphers if c.get('bits', 0) < 128 or 'des' in c.get('name', '').lower()
-        ]
+    # 2. Pre-process specific security flags
+    # Check if the user is running as root/admin (common high-risk indicator)
+    current_user = fingerprint.get("current_user", "")
+    is_privileged = "root" in current_user or "admin" in current_user or "dba" in current_user
+    
+    db_status = meta.get("database_status", "Unknown")
+
+    # 3. Construct the Prompt
+    prompt = (
+        "As a NetShieldAI's Senior Cybersecurity Analyst, analyze the following SQL Injection "
+        "Audit Report data and provide a professional security assessment.\n\n"
         
-        if weak_ciphers:
-             prompt += f"Weak/Legacy Ciphers Accepted (Priority Review):\n"
-             for cipher_detail in weak_ciphers:
-                 prompt += f"   - {cipher_detail}\n"
-        else:
-             prompt += "Weak/Legacy Ciphers Accepted: None found below 128 bits.\n"
+        "### ANALYSIS REQUIREMENTS\n"
+        "You must organize your response into the following sections. "
+        "**Use Markdown Tables** for clear data presentation where requested.\n\n"
+        
+        "1. **Executive Summary:**\n"
+        "   - Assess the immediate risk level (e.g., CRITICAL if database is exposed).\n"
+        "   - Summarize the scope of compromise (how many injection types found).\n"
+        "   - Explicitly state if the database is currently 'Exposed' or if Data Extraction is possible.\n\n"
+        
+        "2. **Target Fingerprint Analysis:**\n"
+        "   - Analyze the detected DBMS and Version.\n"
+        "   - \n"
+        "   - Assess the impact of the 'Current User' privileges (highlight if root/admin).\n\n"
+        
+        "3. **Vulnerability Findings (Table Required):**\n"
+        "   - Create a table with columns: [Risk Level, Injection Type, Payload Snippet, Recommended Fix].\n"
+        "   - Summarize the specific techniques used (e.g., Boolean-based, Time-based).\n\n"
+        
+        "4. **Technical Remediation Plan:**\n"
+        "   - Provide specific code-level fixes (e.g., Prepared Statements).\n"
+        "   - Suggest infrastructure controls (e.g., WAF, Input Validation).\n\n"
+        
+        "--- START REPORT DATA ---\n"
+    )
+
+    # --- Inject Data ---
+
+    # Metadata & Counts
+    prompt += f"Target URL: {meta.get('target_url', 'Unknown')}\n"
+    prompt += f"Scan Date: {meta.get('scan_date', 'Unknown')}\n"
+    prompt += f"Database Status: {db_status}\n"
+    prompt += f"Total Vulnerabilities: {counts.get('vulnerabilities_found', 0)}\n"
+    prompt += f"Unique Injection Types: {counts.get('injection_types_count', 0)}\n\n"
+
+    # Database Fingerprint
+    prompt += "DATABASE FINGERPRINT:\n"
+    prompt += f"- Technology: {fingerprint.get('detected_dbms', 'Unknown')}\n"
+    prompt += f"- Version: {fingerprint.get('version', 'Unknown')}\n"
+    prompt += f"- Current User: {current_user} {'(PRIVILEGED ACCOUNT)' if is_privileged else ''}\n"
+    prompt += f"- Current DB: {fingerprint.get('current_database', 'Unknown')}\n\n"
+
+    # Vulnerabilities List
+    if vulns:
+        prompt += "DETECTED INJECTION VECTORS:\n"
+        for i, v in enumerate(vulns, 1):
+            # Truncate very long payloads for the prompt to save tokens, if necessary
+            payload = v.get('payload', 'N/A')
+            if len(payload) > 150:
+                payload = payload[:147] + "..."
+                
+            prompt += f"{i}. [{v.get('risk_level')}] Type: {v.get('injection_type')}\n"
+            prompt += f"   - Title: {v.get('title')}\n"
+            prompt += f"   - Payload: {payload}\n"
+            prompt += f"   - Remediation Hint: {v.get('remediation')}\n"
+    else:
+        prompt += "DETECTED INJECTION VECTORS: None found.\n"
+
+    prompt += "--- END REPORT DATA ---\n\n"
+    prompt += "Please generate the assessment now, focusing on the critical nature of the exposed database."
+
+    return prompt
 
 
-    # 6. SSL Certificate
-    certificate = parsed_data.get("ssl_certificate", {})
-    if certificate:
-        prompt += "\nSSL Certificate Details:\n"
-        # Only include fields relevant to security or expiration review
-        prompt += f" - Common Name: {certificate.get('common_name', 'N/A')}\n"
-        prompt += f" - Issuer: {certificate.get('issuer', 'N/A')}\n"
-        prompt += f" - Signature Algorithm: {certificate.get('signature_algorithm', 'N/A')}\n"
-        prompt += f" - Key Details: {certificate.get('key_details', 'N/A')}\n"
-        prompt += f" - Valid Until: {certificate.get('not_valid_after', 'N/A')}\n"
-        # Note: 'key_exchange_groups' is excluded as it was empty in the report data.
-
-    prompt += "\n--- End SSLScan Report Data ---\n"
-    prompt += "Please ensure the response is concise, highly technical, and strictly follows the four required section headings."
+def _format_killchain_summary_prompt(parsed_data: Dict[str, Any]) -> str:
+    """
+    Crafts a strategic, full-spectrum security audit prompt based on the 
+    Kill Chain Analysis report.
+    """
     
+    # --- 1. Extract Helper Variables ---
+    meta = parsed_data.get("metadata", {})
+    risks = parsed_data.get("risk_summary", {})
+    phases = parsed_data.get("phase_analysis", {})
+    recon = phases.get("recon", {})
+    tech = phases.get("weaponization", {})
+    vulns = parsed_data.get("vulnerabilities", [])
+
+    # --- 2. Filter Critical/High Findings ---
+    # We prioritize the most dangerous issues for the prompt context
+    critical_issues = [v for v in vulns if v.get("severity", "").upper() in ["CRITICAL", "HIGH"]]
+    
+    # If no criticals, grab mediums to ensure we have something to discuss
+    if not critical_issues:
+        critical_issues = [v for v in vulns if v.get("severity", "").upper() == "MEDIUM"][:5]
+
+    # --- 3. Construct the Prompt ---
+    prompt = (
+        "As a Netshield's Lead Penetration Tester, analyze the following Full-Spectrum Kill Chain "
+        "Security Assessment data and provide a strategic executive report.\n\n"
+        
+        "### ANALYSIS REQUIREMENTS\n"
+        "You must organize your response into the following sections using **Markdown**:\n\n"
+        
+        "1. **Executive Kill Chain Summary:**\n"
+        "   - Provide a verdict on the target's posture (Critical, Poor, Moderate, or Secure).\n"
+        "   - Summarize the attack surface identified in the Reconnaissance phase.\n"
+        "   - Highlight the most dangerous exploit path discovered.\n\n"
+        
+        "2. **Phase 1: Reconnaissance & Exposure:**\n"
+        "   - Analyze the open ports and discovered subdomains/URLs.\n"
+        "   - Assessing if the exposed surface area is excessive.\n\n"
+        
+        "3. **Phase 2: Weaponization (Tech Stack Risks):**\n"
+        "   - Analyze the detected technologies (Server, Language).\n"
+        "   - Mention if the versions detected (e.g., Nginx, PHP) are outdated or widely targeted.\n\n"
+        
+        "4. **Phase 3: Exploitation (Critical Findings Table):**\n"
+        "   - Create a Markdown table with columns: [Severity, Vulnerability, Impact].\n"
+        "   - Focus on the 'Critical' and 'High' findings provided in the data.\n\n"
+        
+        "5. **Strategic Remediation Plan:**\n"
+        "   - Provide a numbered list of prioritized fixes.\n"
+        "   - Address the root causes (e.g., 'Sanitize Input' for SQLi, 'Update Server' for Version Leaks).\n\n"
+        
+        "--- START KILL CHAIN DATA ---\n"
+    )
+
+    # --- Inject Data ---
+
+    # Global Metadata
+    prompt += f"Target: {meta.get('target', 'Unknown')}\n"
+    prompt += f"Scan Date: {meta.get('scan_date', 'Unknown')}\n"
+    prompt += f"Profile: {meta.get('profile', 'Full Audit')}\n\n"
+
+    # Risk Dashboard
+    prompt += "RISK DASHBOARD:\n"
+    prompt += f"- Critical: {risks.get('critical', 0)}\n"
+    prompt += f"- High: {risks.get('high', 0)}\n"
+    prompt += f"- Medium: {risks.get('medium', 0)}\n"
+    prompt += f"- Total Findings: {risks.get('total', 0)}\n\n"
+
+    # Phase 1: Recon
+    prompt += "PHASE 1: RECONNAISSANCE DATA:\n"
+    prompt += f"- IP Address: {recon.get('target_ip', 'Unknown')}\n"
+    prompt += f"- Status: {recon.get('status', 'Unknown')}\n"
+    prompt += f"- Open Ports: {', '.join(recon.get('open_ports', []))}\n"
+    prompt += f"- Subdomains Found: {recon.get('subdomains_count', 0)}\n"
+    prompt += f"- URLs Discovered: {recon.get('urls_count', 0)}\n\n"
+
+    # Phase 2: Tech
+    prompt += "PHASE 2: TECHNOLOGY STACK:\n"
+    if tech:
+        for k, v in tech.items():
+            prompt += f"- {k.title()}: {v}\n"
+    else:
+        prompt += "- No technology fingerprinting data available.\n"
+    prompt += "\n"
+
+    # Phase 3: Vulnerabilities
+    prompt += "PHASE 3: CONFIRMED VULNERABILITIES (Top Priorities):\n"
+    if critical_issues:
+        for v in critical_issues[:10]: # Limit to top 10 to avoid token overflow
+            prompt += f"- [{v.get('severity')}] {v.get('title')}\n"
+            if v.get('cwe') and v.get('cwe') != "N/A":
+                prompt += f"  CWE: {v.get('cwe')}\n"
+            if v.get('evidence'):
+                prompt += f"  Evidence: {v.get('evidence')}\n"
+            if v.get('description'):
+                # Truncate description to keep it concise
+                desc = v.get('description')[:200] + "..." if len(v.get('description')) > 200 else v.get('description')
+                prompt += f"  Context: {desc}\n"
+            prompt += "\n"
+    else:
+        prompt += "No Critical or High vulnerabilities detected. Review Medium/Low findings in full report.\n"
+
+    prompt += "--- END KILL CHAIN DATA ---\n\n"
+    prompt += "Please generate the strategic assessment now."
+
     return prompt
 
 
@@ -327,19 +635,25 @@ async def summarize_report_with_llm( # Added 'async' keyword here
         prompt = _format_zap_summary_prompt(parsed_data)
     elif report_type.lower() == "sslscan":
         prompt = _format_sslscan_summary_prompt(parsed_data)
+    elif report_type.lower() == "pcap":
+        prompt = _format_traffic_analysis_prompt(parsed_data)
+    elif report_type.lower() == "sql":
+        prompt = _format_sql_summary_prompt(parsed_data)
+    elif report_type.lower() == "killchain":
+        prompt = _format_killchain_summary_prompt(parsed_data)
     else:
-        print(f"Warning: Unsupported report type")
+        logger.warning(f"Unsupported report type: {report_type}")
 
 
-    print(f"\n--- Sending formatted prompt to LLM for {report_type} report summary ---")
+    logger.info(f"Generating summary for {report_type} report...")
 
     try:
         # Call the passed generate_response_func
         llm_response = await generate_response_func(llm_instance, prompt, max_tokens=config.DEFAULT_SUMMARIZE_MAX_TOKENS)
         return llm_response
     except Exception as e:
-        print(f"Error generating LLM response for {report_type} summary: {e}")
-        return f"Error generating summary for {report_type} report. Please try again. Details: {e}"
+        logger.error(f"Error generating LLM response for {report_type} summary: {e}")
+        return f"Error generating summary for {report_type} report. Please try again."
 
 
 
@@ -379,12 +693,12 @@ async def summarize_chat_history_segment( # Added 'async' keyword here
     
     summarization_prompt += "--- End Conversation History ---\n\nSummary:"
 
-    print(f"\n--- Sending chat history segment to LLM for summarization (length: {len(summarization_prompt)} chars) ---")
+    logger.info(f"Summarizing chat history segment ({len(history_segment)} turns)...")
 
     try:
         # Call generate_response_func (now awaited as it's an async function)
         summary_response = await generate_response_func(llm_instance, summarization_prompt, max_tokens=max_tokens)
         return summary_response.strip()
     except Exception as e:
-        print(f"Error generating history summary: {e}")
-        return "(Error summarizing previous conversation. Some context may be lost.)"
+        logger.error(f"Error generating history summary: {e}")
+        return "(Error summarizing previous conversation.)"

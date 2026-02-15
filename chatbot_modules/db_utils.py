@@ -180,6 +180,36 @@ def delete_session(session_id: str):
     conn.commit()
     conn.close()
 
+def clear_chat_history(session_id: str):
+    """Deletes all messages for a session but keeps the session metadata (and report)."""
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    cursor.execute("DELETE FROM chat_history WHERE session_id = ?", (session_id,))
+    conn.commit()
+    conn.close()
+
+def delete_all_user_sessions(user_id: str):
+    """Permanently deletes all sessions and history for a specific user."""
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    
+    # 1. Get all session IDs for this user
+    cursor.execute("SELECT session_id FROM user_sessions WHERE user_id = ?", (user_id,))
+    sessions = cursor.fetchall()
+    session_ids = [s[0] for s in sessions]
+    
+    if session_ids:
+        # 2. Delete all chat history for these sessions
+        placeholders = ','.join(['?'] * len(session_ids))
+        cursor.execute(f"DELETE FROM chat_history WHERE session_id IN ({placeholders})", session_ids)
+        
+        # 3. Delete the sessions themselves
+        cursor.execute("DELETE FROM user_sessions WHERE user_id = ?", (user_id,))
+        
+    conn.commit()
+    conn.close()
+    return session_ids # Return to help with Pinecone cleanup
+
 # --- Message Management ---
 
 def add_message(session_id: str, role: str, content: str):

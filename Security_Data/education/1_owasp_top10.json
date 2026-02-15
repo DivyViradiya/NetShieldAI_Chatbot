@@ -1,0 +1,208 @@
+{
+  "metadata": {
+    "title": "OWASP Top 10:2021 — Comprehensive Concepts Guide",
+    "version": "2021",
+    "description": "Foundational concepts file covering mechanics, root causes, vectors, and defenses."
+  },
+  "vulnerabilities": [
+    {
+      "id": "A01:2021",
+      "title": "Broken Access Control",
+      "concept": "Access control enforces policy such that users cannot act outside of their intended permissions. Failures occur when the application does not properly enforce these boundaries, allowing users to perform actions or access data they should not be able to.",
+      "technical_mechanics": [
+        "Vertical Privilege Escalation: A lower-privilege user (e.g., 'User') accesses functions reserved for higher-privilege users (e.g., 'Admin').",
+        "Horizontal Privilege Escalation: A user accesses the data of another user with the same privilege level (e.g., User A accessing User B's private messages).",
+        "Insecure Direct Object References (IDOR): The application provides direct access to objects (like files or database keys) based on user-supplied input without verifying authorization."
+      ],
+      "attack_vectors": [
+        "Modifying the URL (e.g., changing app.com/user/get?id=123 to id=124).",
+        "Forcing browsing to hidden pages (e.g., typing /admin into the browser when no link exists).",
+        "Manipulating JSON Web Tokens (JWT) or session cookies to elevate privileges.",
+        "CORS (Cross-Origin Resource Sharing) misconfigurations allowing unauthorized API access."
+      ],
+      "prevention_and_mitigation": [
+        "Deny by Default: The default stance of the application must be to reject access unless explicitly granted.",
+        "Server-Side Validation: Never rely on the frontend (hiding buttons) for security. Validation must happen on every request at the server level.",
+        "Role-Based Access Control (RBAC): Implement strict ownership verification (e.g., if (record.ownerID == currentUser.ID)).",
+        "Disable Directory Listing: Ensure server configurations do not allow file traversal."
+      ]
+    },
+    {
+      "id": "A02:2021",
+      "title": "Cryptographic Failures",
+      "concept": "Previously known as 'Sensitive Data Exposure,' this category focuses on the root cause: failures in cryptography (or lack thereof) that lead to data exposure. This includes data at rest (storage) and data in transit (network).",
+      "technical_mechanics": [
+        "Transmission: Sending sensitive data (passwords, credit cards, PII) over HTTP, FTP, or SMTP instead of HTTPS/TLS.",
+        "Storage: Storing passwords in plain text or using weak hashing algorithms (MD5, SHA1) instead of strong, salted hashes (Argon2, bcrypt).",
+        "Key Management: Hardcoding cryptographic keys in source code or storing them in public repositories.",
+        "Entropy: Using weak random number generators that make encryption keys predictable."
+      ],
+      "attack_vectors": [
+        "Man-in-the-Middle (MITM): Intercepting traffic on non-HTTPS connections to steal session cookies or credentials.",
+        "Downgrade Attacks: Forcing a connection to drop from TLS to an older, vulnerable protocol (like SSL v3).",
+        "Rainbow Tables: Using pre-computed hash tables to reverse simple, unsalted password hashes."
+      ],
+      "prevention_and_mitigation": [
+        "Data Classification: Identify what data is sensitive and ensure it is encrypted.",
+        "Strong Algorithms: Use standard, vetted algorithms (AES-256, RSA-2048, Ed25519). Do not write your own crypto.",
+        "HSTS (HTTP Strict Transport Security): Enforce HTTPS connections via headers to prevent downgrade attacks.",
+        "Salted Hashing: Always salt and hash passwords using work-factor algorithms like Argon2, scrypt, or bcrypt."
+      ]
+    },
+    {
+      "id": "A03:2021",
+      "title": "Injection",
+      "concept": "Injection occurs when untrusted user data is sent to an interpreter as part of a command or query. The interpreter tricks the system into executing unintended commands or accessing unauthorized data.",
+      "technical_mechanics": [
+        "SQL Injection (SQLi): Malicious SQL statements are inserted into entry fields for execution (e.g., ' OR '1'='1).",
+        "Command Injection: Injecting OS commands into an application that executes system shell commands.",
+        "LDAP/NoSQL Injection: Similar to SQLi but targets LDAP directories or NoSQL databases like MongoDB.",
+        "Cross-Site Scripting (XSS): (Now consolidated under Injection) Injecting malicious scripts into web pages viewed by other users."
+      ],
+      "attack_vectors": [
+        "Union-Based SQLi: Using the UNION operator to combine the results of two queries, allowing data exfiltration.",
+        "Blind SQLi: Asking the database true/false questions to infer data character by character when no error messages are returned.",
+        "Stored XSS: Saving a malicious script in the database (e.g., a comment) that executes whenever a user loads the page."
+      ],
+      "prevention_and_mitigation": [
+        "Parameterized Queries (Prepared Statements): The primary defense. This ensures the database treats user input as data, not executable code.",
+        "Input Validation: Use 'allow-lists' to ensure input matches expected patterns (e.g., email regex).",
+        "Context-Aware Output Encoding: Convert special characters into their HTML entity equivalents (e.g., < becomes &lt;) to prevent XSS."
+      ]
+    },
+    {
+      "id": "A04:2021",
+      "title": "Insecure Design",
+      "concept": "This is a new category focusing on risks related to design and architectural flaws. It emphasizes that secure coding cannot fix an inherently insecure design.",
+      "technical_mechanics": [
+        "Missing Business Logic: failing to anticipate how a feature could be abused (e.g., a 'coupon' system that allows unlimited stacking of discounts because no limit was designed).",
+        "Lack of Threat Modeling: Building complex systems without mapping out data flows, trust boundaries, and potential threats.",
+        "Cheating 'Security': Relying on obscure variable names or hidden fields ('Security through Obscurity') instead of actual controls."
+      ],
+      "attack_vectors": [
+        "Bot Attacks: Exploiting a purchase flow designed without rate limiting or CAPTCHA, allowing scalpers to buy all inventory instantly.",
+        "Business Logic Abuse: Manipulating the workflow (e.g., skipping the 'payment' step but jumping directly to 'shipping')."
+      ],
+      "prevention_and_mitigation": [
+        "Threat Modeling: Perform threat modeling exercises (STRIDE, DREAD) during the design phase, not after coding.",
+        "Secure Design Patterns: Use established patterns for authentication and state management.",
+        "Unit/Integration Tests: Write tests specifically to validate resistance to the threat model (e.g., 'test that a user cannot bypass payment')."
+      ]
+    },
+    {
+      "id": "A05:2021",
+      "title": "Security Misconfiguration",
+      "concept": "This occurs when security settings are defined, implemented, and maintained insecurely. It is often the result of using default configurations, incomplete configurations, or open cloud storage.",
+      "technical_mechanics": [
+        "Default Accounts: Leaving 'admin/admin' or default keys on servers, databases, or CMS installations.",
+        "Verbose Error Messages: Displaying stack traces to users, which reveals internal file paths, software versions, and logic flaws.",
+        "Unnecessary Features: Installing unnecessary ports, services, pages, or permissions that increase the attack surface.",
+        "XML External Entities (XXE): (Now consolidated here) Misconfigured XML parsers loading external content."
+      ],
+      "attack_vectors": [
+        "Cloud Bucket Exposure: S3 buckets or Azure blobs configured as 'Public' containing sensitive backups.",
+        "Admin Console Access: Accessing default admin pages (e.g., /tomcat-manager) that were not disabled or password-protected."
+      ],
+      "prevention_and_mitigation": [
+        "Hardening Process: Implement a repeatable hardening process for deploying new environments (remove unused services).",
+        "Disable Defaults: Change all default credentials immediately upon installation.",
+        "Generic Error Handling: Configure the application to show generic error messages to users while logging detailed errors internally."
+      ]
+    },
+    {
+      "id": "A06:2021",
+      "title": "Vulnerable and Outdated Components",
+      "concept": "Modern applications rely heavily on libraries, frameworks, and other software modules. If an application uses a component with a known vulnerability (CVE), the application itself becomes vulnerable.",
+      "technical_mechanics": [
+        "Direct Dependencies: Libraries you explicitly install (e.g., React, Django, Log4j).",
+        "Transitive Dependencies: Libraries that your libraries use. You may not even know they are there.",
+        "End-of-Life (EOL): Using software that is no longer supported or patched by the vendor."
+      ],
+      "attack_vectors": [
+        "Automated Scanning: Attackers use bots to scan the internet for specific file signatures indicating a vulnerable version of a library (e.g., scanning for unpatched WordPress plugins).",
+        "Supply Chain Attacks: Compromising a library repository so that developers download a malicious version."
+      ],
+      "prevention_and_mitigation": [
+        "Inventory: Maintain a Software Bill of Materials (SBOM) to know exactly what you are running.",
+        "SCA Tools: Use Software Composition Analysis tools (e.g., OWASP Dependency-Check, Snyk, npm audit) to automatically detect known vulnerabilities.",
+        "Patch Management: Establish a process to update components immediately when patches are released."
+      ]
+    },
+    {
+      "id": "A07:2021",
+      "title": "Identification and Authentication Failures",
+      "concept": "Previously 'Broken Authentication,' this covers weaknesses in confirming a user's identity, session management, and credential protection.",
+      "technical_mechanics": [
+        "Credential Stuffing: Attackers use lists of username/password pairs breached from other sites to login.",
+        "Brute Force: Automated guessing of passwords.",
+        "Session Fixation: An attacker sets a user's session ID before they log in, then uses it to hijack the session after login.",
+        "Weak Recovery: 'Forgot Password' questions that are easily guessed (e.g., 'What is your dog's name?')."
+      ],
+      "attack_vectors": [
+        "Session Hijacking: Stealing a valid session ID (via XSS or network sniffing) to impersonate a user.",
+        "Permissive Rate Limiting: Allowing an attacker to try 10,000 passwords on a single account without locking it."
+      ],
+      "prevention_and_mitigation": [
+        "Multi-Factor Authentication (MFA): The single most effective control against credential theft.",
+        "Rate Limiting: Implement delays or lockouts after failed login attempts to stop brute force.",
+        "NIST Guidelines: Follow NIST 800-63B guidelines (e.g., do not require arbitrary password rotation, do not use 'security questions')."
+      ]
+    },
+    {
+      "id": "A08:2021",
+      "title": "Software and Data Integrity Failures",
+      "concept": "This category focuses on making assumptions about software updates, critical data, and CI/CD pipelines without verifying their integrity. It addresses the risk of code or data being tampered with before it reaches the application.",
+      "technical_mechanics": [
+        "Insecure Deserialization: (Consolidated here) Trusting serialized objects without verification, allowing remote code execution (RCE).",
+        "CI/CD Tampering: Attackers modifying code in the build pipeline before it is deployed.",
+        "Unsigned Updates: Downloading firmware or software updates without verifying a digital signature."
+      ],
+      "attack_vectors": [
+        "SolarWinds Style Attacks: Injecting malicious code into the build process of a trusted vendor.",
+        "Man-in-the-Middle Updates: Intercepting a router's firmware update request to inject a malicious image."
+      ],
+      "prevention_and_mitigation": [
+        "Digital Signatures: Verify the digital signature of all software/updates before execution.",
+        "CI/CD Security: Segregate build environments and ensure rigorous access controls on code repositories.",
+        "Serialized Data: Avoid serializing data if possible; if necessary, integrity check the data before deserialization."
+      ]
+    },
+    {
+      "id": "A09:2021",
+      "title": "Security Logging and Monitoring Failures",
+      "concept": "This vulnerability is the failure to detect, log, and respond to active breaches. Without logs, you cannot understand what happened during an attack.",
+      "technical_mechanics": [
+        "Insufficient Logging: Not logging critical events like failed logins, high-value transactions, or access control failures.",
+        "Local Storage Only: Storing logs only on the compromised server (attacker can delete them).",
+        "No Alerting: Logs exist, but no one is notified when suspicious patterns occur."
+      ],
+      "attack_vectors": [
+        "Silent Breach: Attackers maintain access for months (persistence) because their initial entry and subsequent actions generated no alerts.",
+        "Log Injection: Attackers inserting malicious data into logs to corrupt log analysis tools."
+      ],
+      "prevention_and_mitigation": [
+        "Centralized Logging: Ship logs to a separate, secure server or cloud service immediately.",
+        "Audit Trails: Ensure all critical actions (login, payment, data deletion) generate a log entry with user context.",
+        "Alerting Thresholds: Set up alerts for anomalies (e.g., 50 failed logins in 1 minute)."
+      ]
+    },
+    {
+      "id": "A10:2021",
+      "title": "Server-Side Request Forgery (SSRF)",
+      "concept": "SSRF occurs when a web application is fetching a remote resource without validating the user-supplied URL. It allows an attacker to coerce the application to send a crafted request to an unexpected destination, often internal systems.",
+      "technical_mechanics": [
+        "Internal Scanning: The attacker uses the server to scan internal networks (e.g., http://localhost, http://192.168.1.1) that are not accessible from the outside internet.",
+        "Cloud Metadata Access: On cloud platforms (AWS, GCP, Azure), accessing the metadata service (e.g., http://169.254.169.254) can reveal API keys and credentials."
+      ],
+      "attack_vectors": [
+        "Image Import Features: If an app allows 'Upload from URL,' an attacker might input an internal IP address.",
+        "Webhook Manipulations: Manipulating webhooks to point to internal services."
+      ],
+      "prevention_and_mitigation": [
+        "Network Segmentation: Isolate the application server from internal networks it doesn't need to access.",
+        "Input Validation: Enforce a strict allow-list of domains/protocols the server can fetch.",
+        "Disable Redirections: Do not allow the HTTP client to automatically follow redirects, as this can be used to bypass filters."
+      ]
+    }
+  ]
+}

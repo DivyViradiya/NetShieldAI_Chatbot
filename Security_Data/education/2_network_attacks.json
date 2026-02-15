@@ -1,0 +1,104 @@
+{
+  "metadata": {
+    "title": "Network Protocol Attacks: The Infrastructure Layer",
+    "version": "1.0",
+    "description": "A deep dive into attacks targeting the communication protocols (TCP, ARP, DNS) that power the internet."
+  },
+  "vulnerabilities": [
+    {
+      "id": "NET-01",
+      "title": "ARP Spoofing (Man-in-the-Middle)",
+      "concept": "Address Resolution Protocol (ARP) is used to map IP addresses to MAC addresses on a local network. It has no verification mechanism. ARP Spoofing occurs when an attacker sends fake ARP messages, linking their MAC address with the IP address of a legitimate computer (like the Gateway).",
+      "technical_mechanics": [
+        "Gratuitous ARP: The attacker constantly broadcasts 'I am 192.168.1.1' to the victim.",
+        "The Victim's ARP Cache updates, mapping the Router's IP to the Attacker's MAC address.",
+        "Data Flow: Victim -> Attacker -> Router. The attacker can now read, modify, or drop packets."
+      ],
+      "attack_vectors": [
+        "Public Wi-Fi: Attackers use tools like Ettercap or Bettercap on open networks to intercept traffic from other users.",
+        "Session Hijacking: Stealing unencrypted session cookies flowing through the hijacked stream."
+      ],
+      "prevention_and_mitigation": [
+        "Dynamic ARP Inspection (DAI): A security feature on enterprise switches that rejects invalid ARP packets.",
+        "Static ARP Entries: Manually mapping critical IP addresses to MAC addresses (cumbersome but secure).",
+        "VPN: Encrypts the tunnel so even if traffic is intercepted, it cannot be read."
+      ]
+    },
+    {
+      "id": "NET-02",
+      "title": "SYN Flood (Denial of Service)",
+      "concept": "This attack exploits the TCP 3-Way Handshake (SYN, SYN-ACK, ACK). The attacker sends a massive number of SYN requests but never sends the final ACK. The server leaves these connections 'half-open,' consuming resources until it crashes or stops accepting new users.",
+      "technical_mechanics": [
+        "TCP Handshake: Normal clients send SYN, wait for SYN-ACK, then send ACK.",
+        "The Attack: The attacker sends SYN packets with spoofed source IPs.",
+        "Resource Exhaustion: The server allocates memory for every SYN it receives and waits for a timeout, filling up the connection table."
+      ],
+      "attack_vectors": [
+        "Botnets: Using thousands of infected devices to target a single server IP.",
+        "DDOS: Distributed Denial of Service, where the traffic volume overwhelms the pipe, not just the server resources."
+      ],
+      "prevention_and_mitigation": [
+        "SYN Cookies: The server does not allocate memory for a connection until the final ACK is received. It encodes the connection data into the sequence number.",
+        "Rate Limiting: Configuring the firewall to limit the number of new connections from a single IP.",
+        "Load Balancers: Using strong hardware load balancers to absorb the attack traffic."
+      ]
+    },
+    {
+      "id": "NET-03",
+      "title": "DNS Poisoning (Spoofing)",
+      "concept": "Domain Name System (DNS) translates 'google.com' into an IP address. DNS Poisoning involves tricking a DNS resolver into caching a false IP address for a domain, redirecting users to a malicious site.",
+      "technical_mechanics": [
+        "Cache Poisoning: The attacker sends a fake response to a DNS query before the legitimate server responds.",
+        "The resolver caches the fake IP (e.g., pointing 'bank.com' to the Attacker's IP).",
+        "Users accessing 'bank.com' are silently served the phishing site."
+      ],
+      "attack_vectors": [
+        "Phishing: Redirecting users to exact replicas of login pages to steal credentials.",
+        "Man-in-the-Middle: Routing traffic through an attacker-controlled server to inject malware."
+      ],
+      "prevention_and_mitigation": [
+        "DNSSEC (DNS Security Extensions): Adds cryptographic signatures to DNS records to verify their authenticity.",
+        "Short TTL: Using short Time-To-Live settings prevents bad data from sticking in the cache for long.",
+        "Randomized Source Ports: Makes it harder for attackers to guess the correct transaction ID to inject a fake response."
+      ]
+    },
+    {
+      "id": "NET-04",
+      "title": "SSL Stripping",
+      "concept": "An attack that forces a user's browser to communicate with a server in plain text (HTTP) instead of encrypted (HTTPS). This usually happens during the initial connection upgrade.",
+      "technical_mechanics": [
+        "The Interception: The attacker sits in the middle (via ARP Spoofing).",
+        "The Strip: The victim requests 'http://example.com'. The server responds with a redirect to 'https://'.",
+        "The attacker intercepts the redirect, establishes the HTTPS link with the server themselves, but keeps the victim on HTTP."
+      ],
+      "attack_vectors": [
+        "Downgrade Attacks: Forcing the connection to use older, vulnerable SSL versions.",
+        "Credential Theft: Since the victim is typing passwords over HTTP, the attacker can see them in plain text."
+      ],
+      "prevention_and_mitigation": [
+        "HSTS (HTTP Strict Transport Security): A header that tells browsers 'Never accept an HTTP connection from this site, ever.'",
+        "HSTS Preloading: Hardcoding the HSTS rule into the browser itself (Chrome, Firefox list) so the very first connection is secure.",
+        "VPN: Encrypts the traffic before it hits the local network, bypassing the stripping attempt."
+      ]
+    },
+    {
+      "id": "NET-05",
+      "title": "Dictionary & Brute Force Attacks",
+      "concept": "The most basic but effective method against network services like SSH, FTP, and Telnet. It involves systematically guessing credentials to gain unauthorized access.",
+      "technical_mechanics": [
+        "Dictionary Attack: Using a pre-defined list of common passwords (e.g., 'rockyou.txt').",
+        "Brute Force: Trying every possible combination of characters (slow but guaranteed to work eventually).",
+        "Hybrid: Trying dictionary words with common variations (e.g., 'Password123')."
+      ],
+      "attack_vectors": [
+        "SSH Scanning: Bots scanning the entire internet for port 22 and trying 'root/123456'.",
+        "Default Credentials: Targeting IoT devices that still use factory default passwords."
+      ],
+      "prevention_and_mitigation": [
+        "Key-Based Authentication: Disabling password login entirely for SSH and using cryptographic keys.",
+        "Fail2Ban: A tool that scans log files and updates firewall rules to ban IPs that show malicious signs (too many password failures).",
+        "Account Lockout Policies: Locking the account after 3-5 failed attempts."
+      ]
+    }
+  ]
+}

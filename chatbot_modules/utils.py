@@ -1,5 +1,6 @@
 import os
 import json
+import logging
 from sentence_transformers import SentenceTransformer, util # Added util for cosine similarity
 from pinecone import Pinecone, ServerlessSpec, PodSpec
 from typing import Dict, Any, List, Optional
@@ -7,6 +8,10 @@ import dotenv
 import uuid # Added for generating unique namespace IDs
 import sys
 import re
+import datetime
+
+# Initialize module logger
+logger = logging.getLogger(__name__)
 
 # Load environment variables from a .env file (if present)
 dotenv.load_dotenv()
@@ -45,13 +50,12 @@ def load_embedding_model() -> SentenceTransformer:
     """
     global _embedding_model
     if _embedding_model is None:
-        print(f"Loading SentenceTransformer model from: {RAG_EMBEDDING_MODEL_PATH}")
+        logger.info(f"Loading embedding model from: {RAG_EMBEDDING_MODEL_PATH}")
         try:
             _embedding_model = SentenceTransformer(RAG_EMBEDDING_MODEL_PATH)
-            print("SentenceTransformer model loaded successfully.")
+            logger.info("Embedding model loaded successfully.")
         except Exception as e:
-            print(f"Error loading SentenceTransformer model from {RAG_EMBEDDING_MODEL_PATH}: {e}")
-            print("Please ensure the model path is correct and the model was saved properly (from S1-2_Model_Retraining.ipynb).")
+            logger.error(f"Error loading embedding model: {e}")
             raise
     return _embedding_model
 
@@ -62,12 +66,9 @@ def initialize_pinecone_index() -> Any: # Returns a pinecone.Index object
     """
     global _pinecone_index
     if _pinecone_index is None:
-        print(f"Initializing Pinecone index: {PINECONE_INDEX_NAME}")
         if not PINECONE_API_KEY or not PINECONE_ENVIRONMENT:
             raise ValueError(
-                "Pinecone API Key or Environment not set. "
-                "Please set PINECONE_API_KEY and PINECONE_ENVIRONMENT "
-                "environment variables."
+                "Pinecone API Key or Environment not set."
             )
         try:
             pc = Pinecone(api_key=PINECONE_API_KEY, environment=PINECONE_ENVIRONMENT)
@@ -75,7 +76,7 @@ def initialize_pinecone_index() -> Any: # Returns a pinecone.Index object
             # Check if index exists, if not, create it
             existing_indexes = [index_info.name for index_info in pc.list_indexes()]
             if PINECONE_INDEX_NAME not in existing_indexes:
-                print(f"Pinecone index '{PINECONE_INDEX_NAME}' not found. Creating it...")
+                logger.info(f"Creating Pinecone index '{PINECONE_INDEX_NAME}'...")
                 
                 # Determine spec based on your setup (Serverless vs PodSpec)
                 # This should match how you created your index in S2_Embedding_Generation.ipynb
@@ -90,12 +91,11 @@ def initialize_pinecone_index() -> Any: # Returns a pinecone.Index object
                     metric=PINECONE_METRIC,
                     spec=spec
                 )
-                print(f"Pinecone index '{PINECONE_INDEX_NAME}' created.")
             
             _pinecone_index = pc.Index(PINECONE_INDEX_NAME)
-            print("Pinecone index initialized successfully.")
+            logger.info(f"Pinecone index '{PINECONE_INDEX_NAME}' initialized.")
         except Exception as e:
-            print(f"Error initializing Pinecone index: {e}")
+            logger.error(f"Error initializing Pinecone index: {e}")
             raise
     return _pinecone_index
 
@@ -140,268 +140,552 @@ def retrieve_rag_context(query: str, top_k: int = DEFAULT_RAG_TOP_K, namespace: 
             return "" # No relevant context found
 
     except Exception as e:
-        print(f"Error during RAG context retrieval: {e}")
+        logger.error(f"Error during RAG context retrieval: {e}")
         return f"Error retrieving context: {e}"
 
 
 def _chunk_nmap_report(parsed_data: Dict[str, Any]) -> List[Dict[str, Any]]:
     """
-    Extracts meaningful text chunks from parsed Nmap report data for LLM grounding.
-    Each chunk represents a specific network finding or high-level summary.
+    Extracts granular text chunks from parsed NetShieldAI (Nmap) report data 
+    optimized for RAG similarity search.
     """
     chunks = []
+    
+    # --- 1. Extract Core Objects ---
     metadata = parsed_data.get("scan_metadata", {})
     summary = parsed_data.get("summary", {})
+    open_ports = parsed_data.get("open_ports", [])
     
-    # Determine Scan Type (Logic duplicated from prompt formatter)
+    target_ip = metadata.get('target_ip', 'Unknown Target')
+    scan_date = metadata.get('scan_date', 'Unknown Date')
+    
+    # --- 2. Determine Scan Type ---
     scan_args = metadata.get('scan_arguments', '')
     args_lower = scan_args.lower()
+    
     if "-a" in args_lower:
-        scan_type = "Aggressive Scan (-A) - Includes OS/Version/Scripting/Traceroute"
-    elif "-sv" in args_lower:
-        scan_type = "Service Version Detection (-sV)"
+        scan_type = "Aggressive Scan (-A)"
+    elif "--script vuln" in args_lower:
+        scan_type = "Vulnerability Scan (--script vuln)"
     elif "-ss" in args_lower:
         scan_type = "TCP SYN Scan (Stealth) (-sS)"
-    elif "-st" in args_lower:
-        scan_type = "TCP Connect Scan (-sT)"
-    elif "-sn" in args_lower or "-sp" in args_lower:
-        scan_type = "Ping Scan (Host Discovery)"
-    elif "-sN" in args_lower or "-sF" in args_lower or "-sX" in args_lower:
-        scan_type = "Stealth/FIN/Xmas Scans"
     else:
         scan_type = "Standard TCP/Port Scan"
 
-
-    # --- Chunk 1: Overall scan metadata ---
-    scan_summary_text = (
-        f"Nmap Scan Metadata: Target IP: {metadata.get('target_ip', 'N/A')}, "
-        f"Host Status: {metadata.get('host_status', 'N/A')}, "
-        f"Scan Date: {metadata.get('scan_date', 'N/A')}. "
-        f"Scan Type: {scan_type}. "
-        f"Total Open Ports: {summary.get('open_ports_count', 0)}."
+    # --- 3. Chunk: Operational Metadata (How & When) ---
+    # Good for queries like: "What command was used?", "When was the scan?", "What tool?"
+    operational_text = (
+        f"NetShieldAI Scan Operational Data for {target_ip}. "
+        f"Tool Used: {metadata.get('tool', 'Nmap')}. "
+        f"Report ID: {metadata.get('report_id', 'N/A')}. "
+        f"Scan Date: {scan_date}. "
+        f"Scan Arguments/Command: {scan_args}. "
+        f"Scan Duration: {summary.get('scan_duration_sec', 0)} seconds."
     )
     chunks.append({
-        "text": scan_summary_text,
-        "id_suffix": "nmap_metadata_summary"
+        "text": operational_text,
+        "id_suffix": "nmap_operational_metadata"
     })
 
-    # --- Chunk 2 (and subsequent): Detailed Open Port Findings ---
-    for i, port_data in enumerate(parsed_data.get("open_ports", [])):
-        port = port_data.get('port', 'N/A')
-        service = port_data.get('service_name', 'N/A')
-        version = port_data.get('service_version', 'N/A')
-        state = port_data.get('state', 'N/A')
-        local_process = port_data.get('local_process', 'N/A')
-        
-        # Helper for a clean ID suffix
-        safe_service = service.replace(' ', '_').replace('?', '').replace('-', '_')
+    # --- 4. Chunk: Executive Security Summary (The Verdict) ---
+    # Good for queries like: "Is the host secure?", "How many threats found?"
+    security_verdict_text = (
+        f"NetShieldAI Security Verdict for {target_ip}. "
+        f"Host Status: {metadata.get('host_status', 'Down')}. "
+        f"Security Posture: {metadata.get('security_posture', 'Unknown')}. "
+        f"Total Threats Detected: {summary.get('threats_detected', 0)}. "
+        f"Total Open Ports Found: {summary.get('ports_found', 0)}. "
+        f"Scan Type Performed: {scan_type}."
+    )
+    chunks.append({
+        "text": security_verdict_text,
+        "id_suffix": "nmap_security_summary"
+    })
 
+    # --- 5. Chunk: Open Ports List (High-Level Overview) ---
+    # Good for queries like: "List all open ports", "What services are running?"
+    # (Prevents needing to retrieve 5+ separate chunks just to get a list)
+    port_list = [f"{p.get('port')}/{p.get('protocol')} ({p.get('service_name')})" for p in open_ports]
+    ports_summary_text = (
+        f"Overview of Open Ports for {target_ip}: "
+        f"The following {len(open_ports)} ports were found open: "
+        f"{', '.join(port_list)}."
+    )
+    chunks.append({
+        "text": ports_summary_text,
+        "id_suffix": "nmap_ports_overview"
+    })
+
+    # --- 6. Chunks: Detailed Individual Port Findings ---
+    # Good for queries like: "What version of HTTP is on port 80?", "Is port 443 open?"
+    for i, port_data in enumerate(open_ports):
+        port_num = port_data.get('port', 'N/A')
+        protocol = port_data.get('protocol', 'tcp')
+        service_name = port_data.get('service_name', 'Unknown')
+        version = port_data.get('service_version', 'Unknown')
+        
+        if version == service_name:
+            version_text = "Version not explicitly identified"
+        else:
+            version_text = f"Version: {version}"
+
+        # Create safe ID
+        safe_service = str(service_name).replace(' ', '_').replace('?', '').replace('|', '_')
+
+        # NOTE: Including target_ip in EVERY chunk is critical for RAG 
+        # so the model knows which IP this port belongs to without retrieving metadata.
         port_chunk_text = (
-            f"Open Port Finding {i+1}: Port {port}/{port_data.get('protocol', 'tcp')}. "
-            f"Service: {service} (Version: {version}). "
-            f"State: {state}. Local Process: {local_process}."
+            f"Detailed Port Finding for {target_ip}: "
+            f"Port {port_num} ({protocol}) is {port_data.get('state', 'Open')}. "
+            f"Service Name: {service_name}. "
+            f"Service Version: {version_text}. "
+            f"Local Process: {port_data.get('local_process', 'No PID found')}."
         )
+        
         chunks.append({
             "text": port_chunk_text,
-            "id_suffix": f"nmap_port_detail_{port}_{safe_service}_{i}"
+            "id_suffix": f"nmap_port_{port_num}_{safe_service}"
         })
-            
+
+    return chunks
+
+def _chunk_traffic_report(parsed_data: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """
+    Extracts text chunks from Traffic Analysis data for grounding.
+    Separates Metrics, Protocols, and specific Conversations.
+    """
+    chunks = []
+    
+    metadata = parsed_data.get("scan_metadata", {})
+    metrics = parsed_data.get("traffic_metrics", {})
+    protocols = parsed_data.get("protocol_hierarchy", [])
+    conversations = parsed_data.get("active_conversations", [])
+    security_insights = parsed_data.get("security_insights", "N/A")
+
+    # --- Chunk 1: Overview & Metrics ---
+    # Good for "How much data was transferred?" or "Was the network busy?"
+    overview_text = (
+        f"Traffic Analysis Overview for {metadata.get('target_node', 'Target')}. "
+        f"Timestamp: {metadata.get('capture_timestamp', 'N/A')}. "
+        f"Duration: {metrics.get('duration_sec', 0)}s. "
+        f"Volume: {metrics.get('data_volume', '0 KB')}. "
+        f"Throughput: {metrics.get('throughput', '0 bps')}. "
+        f"Automated Verdict: {security_insights}."
+    )
+    chunks.append({
+        "text": overview_text,
+        "id_suffix": "traffic_overview_metrics"
+    })
+
+    # --- Chunk 2: Dominant Protocols ---
+    # Good for "What kind of traffic was detected?"
+    # We aggregate the top 3-5 protocols into one text block for context.
+    if protocols:
+        # Sort by bytes desc
+        sorted_protos = sorted(protocols, key=lambda x: x.get('bytes', 0), reverse=True)
+        top_protos = [
+            f"{p['protocol']} ({p['bytes']} bytes)" 
+            for p in sorted_protos if p['protocol'] not in ['frame', 'eth', 'ip', 'data']
+        ]
+        proto_text = f"Dominant Application Protocols Detected: {', '.join(top_protos)}."
+        
+        chunks.append({
+            "text": proto_text,
+            "id_suffix": "traffic_protocol_summary"
+        })
+
+    # --- Chunk 3+: Active Conversations (Individual Chunks) ---
+    # Critical for "Who did it talk to?" queries.
+    # Each conversation gets its own chunk so vector search hits the specific IP.
+    for i, conv in enumerate(conversations):
+        src = f"{conv.get('src_ip')}:{conv.get('src_port')}"
+        dst = f"{conv.get('dst_ip')}:{conv.get('dst_port')}"
+        
+        conv_text = (
+            f"Traffic Connection Detected: Device {src} communicated with {dst}. "
+            f"Source Port: {conv.get('src_port')}, Destination Port: {conv.get('dst_port')}."
+        )
+        
+        # Create a unique ID based on the destination IP for easy filtering later
+        safe_dst_ip = str(conv.get('dst_ip')).replace('.', '_')
+        
+        chunks.append({
+            "text": conv_text,
+            "id_suffix": f"traffic_conn_{safe_dst_ip}_{i}"
+        })
+
     return chunks
 
 def _chunk_zap_report(parsed_data: Dict[str, Any]) -> List[Dict[str, Any]]:
     """
-    Extracts meaningful text chunks from parsed ZAP report data.
-    Each chunk represents a specific vulnerability finding (Description, Solution, etc.) 
-    or a high-level summary.
+    Chunks ZAP report data into granular, semantic units to maximize RAG retrieval accuracy.
+    
+    Strategies applied:
+    1. Contextual Splitting: Separates 'What' (Description), 'Where' (URL), and 'How' (Solution).
+    2. Atomic Remediation: Breaks multi-step solutions into individual actionable tips.
+    3. Priority Weighting: Creates specific chunks for High-Risk items to boost search relevance.
     """
     chunks = []
-    metadata = parsed_data.get("scan_metadata", {})
     
-    # Aligning keys with the actual parsed JSON structure
-    target_url = metadata.get('target_url', metadata.get('site', 'N/A'))
-    tool_info = metadata.get('tool', 'ZAP Scanner')
-
-    # --- Chunk 1: Overall scan metadata (more detailed) ---
-    scan_summary_text = (
-        f"ZAP Scan Metadata: Target URL: {target_url}, "
-        f"Tool: {tool_info}, "
-        f"Report ID: {metadata.get('report_id', 'N/A')}, "
-        f"Generated At: {metadata.get('generated_at', 'N/A')}. "
-        f"Total alerts (Summary Count): {parsed_data.get('summary', {}).get('total_alerts', 0)}."
+    # --- 1. Global Scan Overview Chunk ---
+    # Good for: "Summarize the scan results" or "What tool was used?"
+    meta = parsed_data.get("scan_metadata", {})
+    summary = parsed_data.get("alert_summary", {})
+    
+    overview_text = (
+        f"OWASP ZAP Scan Report. Tool: {meta.get('tool', 'OWASP ZAP')}. "
+        f"Report ID: {meta.get('report_id', 'N/A')}. "
+        f"Date: {meta.get('generated_at', 'N/A')}. "
+        f"Risk Breakdown: High={summary.get('High', 0)}, "
+        f"Medium={summary.get('Medium', 0)}, "
+        f"Low={summary.get('Low', 0)}, "
+        f"Info={summary.get('Info', 0)}. "
+        f"Total Alerts: {summary.get('Total', 0)}."
     )
+    
     chunks.append({
-        "text": scan_summary_text,
-        "id_suffix": "zap_scan_metadata_summary"
+        "text": overview_text,
+        "metadata": {"type": "scan_overview", "report_id": meta.get('report_id')},
+        "id_suffix": "scan_overview"
     })
 
-    # --- Chunk 2: Alerts by Risk Counts ---
-    risk_counts = parsed_data.get('summary', {}).get('risk_counts', {})
-    if risk_counts:
-        risk_summary_text = "ZAP Alert Counts by Risk Level: "
-        risk_details = [f"{risk_level}: {count}" for risk_level, count in risk_counts.items()]
+    # --- 2. Iterate Through Findings ---
+    findings = parsed_data.get("findings", [])
+    
+    for i, finding in enumerate(findings):
+        # Extract fields
+        name = finding.get('name', 'Unknown Vulnerability')
+        risk = finding.get('risk_level', 'Info')
+        url = finding.get('url', 'N/A')
+        description = finding.get('description', '')
+        solution = finding.get('solution', '')
+        score = finding.get('predicted_score', 'N/A')
         
-        if risk_details:
-            risk_summary_text += ", ".join(risk_details) + "."
+        # Helper: Clean newlines for text blocks to improve vector embedding quality
+        def clean_text(t): return " ".join(t.split()) if t else "N/A"
+        
+        # Helper: Create safe ID
+        safe_name = "".join(c if c.isalnum() else "_" for c in name)[:40]
+
+        # --- Chunk A: Identity & Risk (The "What") ---
+        # Good for: "Did you find any High risk issues?"
+        identity_text = (
+            f"Vulnerability Detected: '{name}'. "
+            f"Risk Level: {risk}. Confidence: {finding.get('confidence', 'N/A')}. "
+            f"Automated Score: {score}."
+        )
+        chunks.append({
+            "text": identity_text,
+            "metadata": {"type": "vuln_identity", "risk": risk, "name": name},
+            "id_suffix": f"vuln_{i}_identity_{safe_name}"
+        })
+
+        # --- Chunk B: Affected Asset (The "Where") ---
+        # Good for: "What is wrong with artists.php?"
+        if url and url != "N/A":
+            asset_text = (
+                f"Asset Exposure: The URL '{url}' contains the vulnerability '{name}' "
+                f"({risk} Risk). This endpoint requires validation."
+            )
             chunks.append({
-                "text": risk_summary_text,
-                "id_suffix": "zap_risk_counts_summary"
+                "text": asset_text,
+                "metadata": {"type": "vuln_asset", "risk": risk, "url": url},
+                "id_suffix": f"vuln_{i}_asset_{safe_name}"
             })
 
-    # --- Chunk 3 (and subsequent): Detailed Vulnerability Findings ---
-    for i, vuln in enumerate(parsed_data.get("vulnerabilities", [])):
-        vuln_name = vuln.get('name', 'N/A')
-        vuln_risk = vuln.get('risk', 'N/A')
-        vuln_url = vuln.get('url', 'N/A')
-        vuln_desc = vuln.get('description', 'N/A')
-        vuln_solution = vuln.get('solution', 'N/A')
-        cwe_id = vuln.get('cwe_id', 'N/A')
-        plugin_id = vuln.get('plugin_id', 'N/A')
-        
-        # Helper for a clean ID suffix
-        safe_name = vuln_name.replace(' ', '_').replace('(', '').replace(')', '').replace('"', '')
-
-        # --- Chunk 3: Core Vulnerability and Location ---
-        core_vuln_chunk = {
-            "text": (
-                f"Vulnerability Finding {i+1}: '{vuln_name}' (Risk: {vuln_risk}, Score: {vuln.get('predicted_score', 'N/A')}). "
-                f"CWE-ID: {cwe_id}, Plugin ID: {plugin_id}. Primary Affected URL: {vuln_url}."
-            ),
-            "id_suffix": f"zap_vuln_core_{safe_name}_{i}"
-        }
-        chunks.append(core_vuln_chunk)
-
-        # --- Chunk 4: Vulnerability Description ---
-        if vuln_desc and vuln_desc != 'N/A':
+        # --- Chunk C: Concept Description (The "Why") ---
+        # Good for: "Explain SQL Injection to me."
+        if description:
+            desc_text = f"Explanation of '{name}': {clean_text(description)}"
             chunks.append({
-                "text": f"Description for '{vuln_name}': {vuln_desc}",
-                "id_suffix": f"zap_vuln_description_{safe_name}_{i}"
+                "text": desc_text,
+                "metadata": {"type": "vuln_description", "name": name},
+                "id_suffix": f"vuln_{i}_desc_{safe_name}"
             })
 
-        # --- Chunk 5: Vulnerability Solution ---
-        if vuln_solution and vuln_solution != 'N/A':
+        # --- Chunk D: Granular Solutions (The "How") ---
+        # Good for: "How do I fix X?" or "Give me a checklist."
+        if solution:
+            # 1. Provide the full solution context first
             chunks.append({
-                "text": f"Solution for '{vuln_name}': {vuln_solution}",
-                "id_suffix": f"zap_vuln_solution_{safe_name}_{i}"
+                "text": f"Remediation Guide for '{name}': {clean_text(solution)}",
+                "metadata": {"type": "vuln_solution_full", "name": name},
+                "id_suffix": f"vuln_{i}_sol_full_{safe_name}"
             })
             
-        # --- Chunk 6: Vulnerability References ---
-        if vuln.get('references'):
-            references_text = f"References for '{vuln_name}': " + ", ".join(vuln['references']) + "."
+            # 2. Split into atomic actionable tips (splitting by newline)
+            # This allows the vector search to find specific coding advice easily.
+            steps = [s.strip() for s in solution.split('\n') if len(s.strip()) > 15]
+            for j, step in enumerate(steps):
+                chunks.append({
+                    "text": f"Actionable Fix for '{name}' (Step {j+1}): {step}",
+                    "metadata": {"type": "vuln_solution_step", "name": name},
+                    "id_suffix": f"vuln_{i}_sol_step_{j}_{safe_name}"
+                })
+
+        # --- Chunk E: Critical Alert Flag ---
+        # Good for: Priority filtering and immediate attention queries.
+        if risk.upper() == "HIGH":
+            critical_text = (
+                f"CRITICAL ALERT: '{name}' is a HIGH risk vulnerability affecting '{url}'. "
+                "Immediate remediation is required to prevent compromise."
+            )
             chunks.append({
-                "text": references_text,
-                "id_suffix": f"zap_vuln_references_{safe_name}_{i}"
+                "text": critical_text,
+                "metadata": {"type": "critical_flag", "priority": "urgent"},
+                "id_suffix": f"vuln_{i}_critical_{safe_name}"
             })
 
-        # --- Chunk 7: Individual Affected URLs/Instances (Only if detailed instance data exists) ---
-        # Note: In your current JSON, vuln.get('urls') is usually [] for header-based alerts, 
-        # so this block will only run for instances with deep, specific details.
-        if vuln.get('urls'):
-            for j, instance in enumerate(vuln['urls']):
-                instance_url = instance.get('url', 'N/A')
-                instance_method = instance.get('method', 'N/A')
-                instance_param = instance.get('parameter', 'N/A')
-                
-                # Handling potential None values for optional fields
-                instance_attack = instance.get('attack') or 'N/A'
-                instance_evidence = instance.get('evidence') or 'N/A'
-                instance_other = instance.get('other_info') or 'N/A'
-
-                instance_chunk_text = (
-                    f"Detailed Instance {j+1} of '{vuln_name}' (Risk: {vuln_risk}): "
-                    f"URL: {instance_url}, Method: {instance_method}, Parameter: {instance_param}. "
-                    f"Attack Payload (Partial): {instance_attack[:200]}{'...' if len(instance_attack) > 200 else ''}. "
-                    f"Evidence (Partial): {instance_evidence[:200]}{'...' if len(instance_evidence) > 200 else ''}. "
-                    f"Other Info: {instance_other[:100]}{'...' if len(instance_other) > 100 else ''}."
-                )
-                chunks.append({
-                    "text": instance_chunk_text,
-                    "id_suffix": f"zap_vuln_instance_{safe_name}_{i}_{j}"
-                })
-                
     return chunks
 
 def _chunk_sslscan_report(parsed_data: Dict[str, Any]) -> List[Dict[str, Any]]:
     """
-    Extracts meaningful text chunks from parsed SSLScan report data.
-    Each chunk represents a specific finding or detail from the report,
-    along with metadata.
+    Extracts high-granularity text chunks from parsed SSLScan data.
+    Designed for Vector Search (RAG) to answer specific questions about 
+    compliance, remediation, dates, and technical details.
     """
     chunks = []
-    metadata = parsed_data.get("scan_metadata", {})
     
-    # Chunk 1: Overall summary (Streamlined to use available fields)
+    # --- Context Variables ---
+    meta = parsed_data.get("metadata", {})
+    target = meta.get("target", "Unknown Host")
+    scan_date = meta.get("scan_date", "Unknown Date")
+    cert = parsed_data.get("certificate_chain", {})
+    protocols = parsed_data.get("protocols", {})
+    vulns = parsed_data.get("vulnerabilities", [])
+
+    # 1. [METADATA] Scan Identity & Target
+    # Matches: "What port was scanned?", "When was the scan performed?"
     chunks.append({
-        "text": (f"SSLScan Summary: Target host {metadata.get('target_host', 'N/A')}, "
-                 f"Port {metadata.get('port', 'N/A')}. "
-                 f"Scan performed at {metadata.get('scan_date', 'N/A')}."
-                 ),
-        "id_suffix": "sslscan_summary"
+        "text": (f"SSLScan Target Identity: Host {target} on Port 443. "
+                 f"Scan performed on {scan_date}. "
+                 f"Overall Security Grade: {meta.get('grade', 'N/A')}."),
+        "metadata": {"source": "scan_identity", "target": target}
     })
 
-    # Chunk 2: Protocols status
-    protocols_text = "SSL/TLS Protocols: " + ", ".join([f"{p.get('name', 'N/A')} {p.get('status', 'N/A')}" for p in parsed_data.get('protocols', [])])
+    # 2. [SUMMARY] Executive Security Status
+    # Matches: "Is google.com secure?", "Give me a summary."
+    vuln_count = len(vulns)
+    status = "Risk Detected" if vuln_count > 0 else "Secure"
     chunks.append({
-        "text": protocols_text,
-        "id_suffix": "sslscan_protocols"
+        "text": (f"Executive Security Summary for {target}: The status is {status}. "
+                 f"The scan detected {vuln_count} vulnerability findings. "
+                 f"Immediate attention is required for Medium/High severity issues."),
+        "metadata": {"source": "exec_summary", "target": target}
     })
 
-    # Chunk 3: Security features (Using 'server_configuration' for correct data access)
-    security_features_text = "TLS Security Features: "
-    features = []
-    for feature, status in parsed_data.get('server_configuration', {}).items():
-        if isinstance(status, list):
-            features.append(f"{feature.replace('_', ' ').title()}: {', '.join(status)}")
-        else:
-            features.append(f"{feature.replace('_', ' ').title()}: {status}")
-    security_features_text += ", ".join(features)
-    chunks.append({
-        "text": security_features_text,
-        "id_suffix": "sslscan_security_features"
-    })
-
-    # Chunk 4: Supported Ciphers (Extracting only accepted ciphers)
-    ciphers = parsed_data.get('supported_ciphers')
-    if ciphers:
-        ciphers_text = "Supported Server Ciphers: " + "; ".join([
-            f"{c.get('name', 'N/A')} ({c.get('bits', 'N/A')} bits) on {c.get('protocol', 'N/A')}"
-            for c in ciphers
-        ])
+    # 3. [VULNERABILITY] Individual Findings (One chunk per finding)
+    # Matches: "What is the weak cipher issue?", "Explain the DES vulnerability."
+    for idx, v in enumerate(vulns):
         chunks.append({
-            "text": ciphers_text,
-            "id_suffix": "sslscan_ciphers"
+            "text": (f"Vulnerability Finding #{idx+1} on {target}: {v.get('name')}. "
+                     f"Severity: {v.get('severity')}. "
+                     f"Technical Detail: {v.get('description')} "
+                     f"Impact: Attackers may exploit this to intercept encrypted traffic."),
+            "metadata": {"source": "vuln_detail", "severity": v.get('severity'), "target": target}
         })
+
+    # 4. [REMEDIATION] Action Plan (Synthetic Chunk)
+    # Matches: "How do I fix the SSL issues?", "What are the remediation steps?"
+    if vulns:
+        fix_list = set() # Use set to avoid duplicates
+        for v in vulns:
+            if "Cipher" in v.get('name', ''):
+                fix_list.add("Disable weak ciphers (specifically DES/3DES) in the server configuration")
+            if "Protocol" in v.get('name', ''):
+                fix_list.add("Disable legacy protocols (TLS 1.0/1.1)")
         
-    # Chunk 5: Detected Vulnerabilities
-    vulnerabilities = parsed_data.get("vulnerabilities", [])
-    if vulnerabilities:
-        vuln_text = "Detected Vulnerabilities: " + "; ".join([
-            f"[{v.get('severity', 'N/A')}] {v.get('description', 'N/A')}"
-            for v in vulnerabilities
-        ])
         chunks.append({
-            "text": vuln_text,
-            "id_suffix": "sslscan_vulnerabilities"
+            "text": (f"Remediation Action Plan for {target}: To secure this server, you must: "
+                     f"{'; '.join(fix_list)}. Apply these changes to the web server or load balancer config."),
+            "metadata": {"source": "remediation_plan", "target": target}
         })
 
-
-    # Chunk 6: SSL Certificate Details (Streamlined to available fields)
-    certificate = parsed_data.get('ssl_certificate', {})
-    if certificate:
-        cert_details_text = (
-            f"SSL Certificate: Common Name '{certificate.get('common_name', 'N/A')}', "
-            f"Issuer '{certificate.get('issuer', 'N/A')}', "
-            f"Signature Algorithm '{certificate.get('signature_algorithm', 'N/A')}', "
-            f"Key Details '{certificate.get('key_details', 'N/A')}'. "
-            f"Valid from {certificate.get('not_valid_before', 'N/A')} to {certificate.get('not_valid_after', 'N/A')}. "
-        )
-        # Note: Altnames is excluded as the field was empty in the last output example and subject/rsa_key_strength are also not present.
+    # 5. [COMPLIANCE] Legacy Protocol Risk
+    # Matches: "Is TLS 1.0 enabled?", "Does it support deprecated protocols?"
+    deprecated = [p for p in protocols.keys() if "1.0" in p or "1.1" in p or "Deprecated" in p]
+    if deprecated:
         chunks.append({
-            "text": cert_details_text,
-            "id_suffix": "sslscan_certificate"
+            "text": (f"Compliance Warning for {target}: The server supports deprecated Legacy Protocols: {', '.join(deprecated)}. "
+                     "These protocols are considered insecure by PCI DSS and NIST standards and should be disabled."),
+            "metadata": {"source": "compliance_risk", "target": target}
         })
+
+    # 6. [PROTOCOL] Active Protocol Details (One chunk per protocol)
+    # Matches: "What ciphers are used for TLS 1.3?", "Is TLS 1.2 supported?"
+    for proto, cipher_list in protocols.items():
+        chunks.append({
+            "text": (f"Protocol Detail: {proto} is ENABLED on {target}. "
+                     f"It supports {len(cipher_list)} cipher suites. "
+                     f"This protocol version is {'Secure' if '1.3' in proto or '1.2' in proto else 'Insecure'}."),
+            "metadata": {"source": "protocol_detail", "protocol": proto, "target": target}
+        })
+
+    # 7. [CIPHER] Strong vs Weak Analysis (Synthetic Split)
+    # Matches: "Does it support AES256?", "List the weak ciphers."
+    strong_ciphers = []
+    weak_ciphers = []
+    for proto, c_list in protocols.items():
+        for c in c_list:
+            desc = f"{c['cipher']} ({c['bits']} bits)"
+            if c['bits'] < 128 or "DES" in c['cipher'] or "RC4" in c['cipher']:
+                weak_ciphers.append(desc)
+            else:
+                strong_ciphers.append(desc)
+    
+    if weak_ciphers:
+        chunks.append({
+            "text": (f"Weak Cipher Inventory for {target}: The following insecure ciphers are active: "
+                     f"{', '.join(weak_ciphers)}. These pose a security risk."),
+            "metadata": {"source": "weak_ciphers", "target": target}
+        })
+    
+    if strong_ciphers:
+        chunks.append({
+            "text": (f"Strong Cipher Inventory for {target}: The server correctly supports modern encryption: "
+                     f"{', '.join(strong_ciphers[:10])}... (and others)."),
+            "metadata": {"source": "strong_ciphers", "target": target}
+        })
+
+    # 8. [CONFIG] Server Hardening Flags
+    # Matches: "Is Secure Renegotiation supported?", "Check for CRIME vulnerability."
+    conf = parsed_data.get("server_configuration", {})
+    if conf:
+        chunks.append({
+            "text": (f"Server Hardening Configuration for {target}: "
+                     f"TLS Compression is {conf.get('tls_compression')}. "
+                     f"Secure Renegotiation is {conf.get('secure_renegotiation')}. "
+                     f"OCSP Stapling is {conf.get('ocsp_stapling')}."),
+            "metadata": {"source": "hardening_config", "target": target}
+        })
+
+    # 9. [CERTIFICATE] Identity & Issuer
+    # Matches: "Who issued the certificate?", "Is the cert for google.com?"
+    chunks.append({
+        "text": (f"SSL Certificate Identity: Issued to Common Name (CN) '{cert.get('subject')}'. "
+                 f"Issued by '{cert.get('issuer')}'. "
+                 f"This certificate validates the identity of {target}."),
+        "metadata": {"source": "cert_identity", "target": target}
+    })
+
+    # 10. [CERTIFICATE] Technical Validity & Cryptography
+    # Matches: "When does the cert expire?", "What is the key size?"
+    chunks.append({
+        "text": (f"SSL Certificate Technical Details: Expires on {cert.get('leaf_expiry')}. "
+                 f"Signature Algorithm: {cert.get('signature_algorithm')}. "
+                 f"Key Type: {cert.get('key_type')}. "
+                 f"The certificate is currently Valid."),
+        "metadata": {"source": "cert_technical", "target": target}
+    })
 
     return chunks
 
+def _chunk_sql_report(parsed_data: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """
+    Extracts high-granularity text chunks from parsed SQL Injection data.
+    Designed for Vector Search (RAG) to answer specific questions about 
+    database exposure, injection types, payloads, and remediation.
+    """
+    chunks = []
+    
+    # --- Context Variables ---
+    meta = parsed_data.get("metadata", {})
+    counts = parsed_data.get("summary_counts", {})
+    fingerprint = parsed_data.get("database_fingerprint", {})
+    vulns = parsed_data.get("vulnerabilities", [])
+
+    target = meta.get("target_url", "Unknown Target")
+    scan_date = meta.get("scan_date", "Unknown Date")
+    db_status = meta.get("database_status", "Unknown")
+
+    # 1. [METADATA] Scan Identity & Target
+    # Matches: "What URL was scanned?", "When was the SQL audit done?"
+    chunks.append({
+        "text": (f"SQL Injection Scan Target Identity: URL {target}. "
+                 f"Scan performed on {scan_date}. "
+                 f"Database Status: {db_status}. "
+                 f"Data Extraction Possible: {meta.get('data_extraction', 'Unknown')}."),
+        "metadata": {"source": "scan_identity", "target": target}
+    })
+
+    # 2. [SUMMARY] Executive Security Status
+    # Matches: "Is the database exposed?", "How many vulnerabilities were found?"
+    vuln_count = counts.get("vulnerabilities_found", 0)
+    type_count = counts.get("injection_types_count", 0)
+    risk_level = "CRITICAL" if db_status.lower() == "exposed" or vuln_count > 0 else "Safe"
+    
+    chunks.append({
+        "text": (f"Executive Security Summary for {target}: The overall risk level is {risk_level}. "
+                 f"The scan detected {vuln_count} vulnerability findings across {type_count} distinct injection types. "
+                 f"Immediate remediation is required to prevent data leakage."),
+        "metadata": {"source": "exec_summary", "target": target}
+    })
+
+    # 3. [FINGERPRINT] Database Technology & User Context
+    # Matches: "What database version is running?", "Did the scan get root access?"
+    dbms = fingerprint.get("detected_dbms", "Unknown")
+    version = fingerprint.get("version", "Unknown")
+    user = fingerprint.get("current_user", "Unknown")
+    current_db = fingerprint.get("current_database", "Unknown")
+    
+    # High-value context for RAG
+    is_privileged = any(role in user.lower() for role in ["root", "admin", "dba", "sa"])
+    privilege_note = "This is a PRIVILEGED account (High Risk)." if is_privileged else "This appears to be a standard user account."
+
+    chunks.append({
+        "text": (f"Database Fingerprint for {target}: The backend DBMS is {dbms} (Version: {version}). "
+                 f"The application is connected as user '{user}' to database '{current_db}'. "
+                 f"{privilege_note}"),
+        "metadata": {"source": "db_fingerprint", "target": target, "dbms": dbms}
+    })
+
+    # 4. [VULNERABILITY] Individual Findings (One chunk per finding)
+    # Matches: "Explain the boolean-blind injection", "What is the risk of the error-based flaw?"
+    for idx, v in enumerate(vulns):
+        # Clean payload for readability in text
+        payload_clean = v.get('payload', '').replace('\n', ' ').strip()
+        
+        chunks.append({
+            "text": (f"Vulnerability Finding #{idx+1} on {target}: {v.get('title')}. "
+                     f"Risk Level: {v.get('risk_level')}. "
+                     f"Injection Type: {v.get('injection_type')}. "
+                     f"Technical Detail: This vector allows attackers to manipulate the query using the payload '{payload_clean}'."),
+            "metadata": {"source": "vuln_detail", "risk": v.get('risk_level'), "type": v.get('injection_type'), "target": target}
+        })
+
+    # 5. [REMEDIATION] Action Plan (Aggregated)
+    # Matches: "How do I fix the SQL injection?", "What code changes are needed?"
+    if vulns:
+        fix_strategies = set()
+        for v in vulns:
+            if v.get('remediation'):
+                fix_strategies.add(v.get('remediation'))
+        
+        # Default fallback if empty
+        if not fix_strategies:
+            fix_strategies.add("Use parameterized queries (Prepared Statements)")
+            
+        chunks.append({
+            "text": (f"Remediation Action Plan for {target}: To secure this database, you must: "
+                     f"{'; '.join(fix_strategies)}. "
+                     f"Sanitize all user inputs and disable verbose error messages in production."),
+            "metadata": {"source": "remediation_plan", "target": target}
+        })
+
+    # 6. [PAYLOADS] Technical Evidence (Synthetic Chunk for WAF)
+    # Matches: "Show me the attack payloads", "Give me WAF rules to block this."
+    if vulns:
+        # Grab a few distinct payloads to provide context without overloading the chunk
+        payload_samples = [v.get('payload', '')[:60] + "..." for v in vulns[:4]] 
+        
+        chunks.append({
+            "text": (f"Attack Payload Evidence for {target}: The scanner successfully executed these malicious SQL patterns: "
+                     f"{' || '.join(payload_samples)}. "
+                     f"These strings should be blocked by your Web Application Firewall (WAF)."),
+            "metadata": {"source": "payload_evidence", "target": target}
+        })
+
+    return chunks
 
 def _chunk_generic_report(parsed_data: Dict[str, Any]) -> List[Dict[str, Any]]:
     """
@@ -455,6 +739,115 @@ def _chunk_generic_report(parsed_data: Dict[str, Any]) -> List[Dict[str, Any]]:
 
     return chunks
 
+def _chunk_killchain_report(parsed_data: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """
+    Converts parsed Kill Chain Analysis data into semantic text chunks 
+    optimized for vector embedding and retrieval.
+    Returns a list of dictionaries: [{"text": "...", "metadata": {...}}]
+    """
+    chunks = []
+    
+    # --- Extract Data Helpers ---
+    meta = parsed_data.get("metadata", {})
+    risks = parsed_data.get("risk_summary", {})
+    phases = parsed_data.get("phase_analysis", {})
+    recon = phases.get("recon", {})
+    tech = phases.get("weaponization", {})
+    vulns = parsed_data.get("vulnerabilities", [])
+    target = meta.get("target", "Target System")
+
+    # --- Chunk 1: Executive Kill Chain Summary ---
+    summary_text = (
+        f"Kill Chain Audit Summary for {target}. "
+        f"Scan Date: {meta.get('scan_date', 'Unknown')}. "
+        f"Total Findings: {risks.get('total', 0)}. "
+        f"Risk Profile: {risks.get('critical', 0)} Critical, {risks.get('high', 0)} High, "
+        f"{risks.get('medium', 0)} Medium vulnerabilities. "
+        f"Profile: {meta.get('profile', 'Standard Scan')}."
+    )
+    # FIX: Wrap in dictionary
+    chunks.append({
+        "text": summary_text,
+        "metadata": {"source": "killchain_summary", "type": "overview"}
+    })
+
+    # --- Chunk 2: Phase 1 - Reconnaissance & Attack Surface ---
+    recon_text = (
+        f"Phase 1 Reconnaissance Data for {target}: "
+        f"Host IP: {recon.get('target_ip', 'Unknown')}. "
+        f"Status: {recon.get('status', 'Unknown')}. "
+        f"Open Ports: {', '.join(recon.get('open_ports', []))}. "
+        f"Attack Surface: Found {recon.get('subdomains_count', 0)} subdomains and "
+        f"discovered {recon.get('urls_count', 0)} distinct URLs."
+    )
+    chunks.append({
+        "text": recon_text,
+        "metadata": {"source": "killchain_recon", "type": "recon"}
+    })
+
+    # --- Chunk 3: Phase 2 - Weaponization (Tech Stack) ---
+    tech_text = (
+        f"Phase 2 Weaponization & Technology Stack for {target}: "
+        f"Server Detected: {tech.get('server', 'Unknown')}. "
+        f"Programming Language: {tech.get('language', 'Unknown')}. "
+        "This technology fingerprint aids in identifying version-specific exploits."
+    )
+    chunks.append({
+        "text": tech_text,
+        "metadata": {"source": "killchain_tech", "type": "technologies"}
+    })
+
+    # --- Chunk 4+: Phase 3 - Exploitation (Vulnerabilities) ---
+    for v in vulns:
+        severity = v.get("severity", "INFO").upper()
+        title = v.get("title", "Unknown Issue")
+        
+        # Clean description
+        raw_desc = v.get("description", "").replace("\n", " ")
+        description = (raw_desc[:250] + "...") if len(raw_desc) > 250 else raw_desc
+        
+        # Clean evidence/payload
+        evidence = v.get("evidence", "N/A").replace("\n", " ")
+        payload = v.get("payload", "")
+        
+        chunk_text = ""
+        
+        # Construct the chunk text based on severity
+        if severity in ["CRITICAL", "HIGH"]:
+            chunk_text = (
+                f"Confirmed Vulnerability ({severity}): {title} on {target}. "
+                f"Evidence/Location: {evidence}. "
+                f"Payload Used: {payload}. "
+                f"Context: {description} "
+                f"Remediation: {v.get('remediation', 'Refer to standard security practices for this CWE.')}"
+            )
+            
+        elif severity == "MEDIUM":
+            chunk_text = (
+                f"Medium Risk Finding: {title} on {target}. "
+                f"Location: {evidence}. "
+                f"Description: {description}"
+            )
+            
+        else:
+            # LOW/INFO
+            if evidence and evidence != "N/A":
+                chunk_text = (
+                    f"Low/Info Finding: {title}. Location: {evidence}."
+                )
+
+        # Only append if text was generated
+        if chunk_text:
+            chunks.append({
+                "text": chunk_text,
+                "metadata": {
+                    "source": "killchain_vuln", 
+                    "severity": severity,
+                    "title": title
+                }
+            })
+
+    return chunks
 
 def load_report_chunks_and_embeddings(parsed_report_data: Dict[str, Any], report_type: str, session_id: str) -> str:
     """
@@ -471,19 +864,24 @@ def load_report_chunks_and_embeddings(parsed_report_data: Dict[str, Any], report
         raw_chunks_with_metadata = _chunk_zap_report(parsed_report_data)
     elif report_type.lower() == "sslscan": # New condition for SSLScan
         raw_chunks_with_metadata = _chunk_sslscan_report(parsed_report_data)
+    elif report_type.lower() == "pcap":
+        raw_chunks_with_metadata = _chunk_traffic_report(parsed_report_data)
+    elif report_type.lower() == "sql":
+        raw_chunks_with_metadata = _chunk_sql_report(parsed_report_data)
+    elif report_type.lower() == "killchain":
+        raw_chunks_with_metadata = _chunk_killchain_report(parsed_report_data)
+    
     else:
-        print(f"Warning: Unknown report type '{report_type}'. Cannot chunk report.")
+        logger.warning(f"Unknown report type '{report_type}'. Cannot chunk report.")
         return ""
 
     if not raw_chunks_with_metadata:
-        print(f"No chunks generated for the {report_type.upper()} report.")
+        logger.warning(f"No chunks generated for the {report_type.upper()} report.")
         return ""
 
-    print(f"Generated {len(raw_chunks_with_metadata)} chunks for the {report_type.upper()} report. Generating embeddings and upserting to Pinecone...")
-    
     # Generate a unique namespace ID for this report session
     report_namespace = f"report-{session_id}"
-    print(f"Using temporary Pinecone namespace: {report_namespace}")
+    logger.info(f"Indexing {len(raw_chunks_with_metadata)} chunks into namespace: {report_namespace}")
 
     vectors_to_upsert = []
     # For batching if many chunks:
@@ -511,7 +909,7 @@ def load_report_chunks_and_embeddings(parsed_report_data: Dict[str, Any], report
     if vectors_to_upsert:
         pinecone_index.upsert(vectors=vectors_to_upsert, namespace=report_namespace)
 
-    print(f"Successfully upserted {len(raw_chunks_with_metadata)} embeddings to Pinecone namespace: {report_namespace}")
+    logger.info(f"Successfully indexed report in namespace: {report_namespace}")
     
     return report_namespace # Return the namespace ID for later retrieval
 
@@ -560,7 +958,7 @@ def retrieve_internal_rag_context(query: str, report_namespace: str, top_k: int 
             return "" # No relevant context found
 
     except Exception as e:
-        print(f"Error during internal RAG context retrieval: {e}")
+        logger.error(f"Error during internal RAG context retrieval: {e}")
         return f"Error retrieving report context: {e}"
 
 def delete_report_namespace(report_namespace: str):
@@ -573,11 +971,8 @@ def delete_report_namespace(report_namespace: str):
 
     pinecone_index = initialize_pinecone_index()
     try:
-        print(f"Deleting Pinecone namespace: {report_namespace}...")
+        logger.info(f"Deleting Pinecone namespace: {report_namespace}")
         pinecone_index.delete(delete_all=True, namespace=report_namespace)
-        print(f"Namespace '{report_namespace}' deleted successfully.")
     except Exception as e:
-        print(f"Error deleting Pinecone namespace '{report_namespace}': {e}")
-        # import traceback
-        # traceback.print_exc() # For debugging, if needed
+        logger.error(f"Error deleting Pinecone namespace '{report_namespace}': {e}")
 

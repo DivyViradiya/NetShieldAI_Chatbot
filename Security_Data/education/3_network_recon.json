@@ -1,0 +1,104 @@
+{
+  "metadata": {
+    "title": "Network Reconnaissance & Port Scanning",
+    "version": "1.2",
+    "description": "Master the art of discovery. Understand the mechanics behind Nmap, TCP handshakes, and how scanners map an infrastructure without being seen."
+  },
+  "vulnerabilities": [
+    {
+      "id": "RECON-01",
+      "title": "The TCP 3-Way Handshake",
+      "concept": "Before any data is exchanged (like loading a webpage), the client and server must agree to talk. This is the 'Handshake'. Understanding this is critical because port scanners manipulate this process to probe servers.",
+      "diagram_url": "tcp_handshake_anim.json",
+      "technical_mechanics": [
+        "Step 1 (SYN): The Client sends a packet with the SYN (Synchronize) flag. Message: 'I want to talk.'",
+        "Step 2 (SYN-ACK): The Server replies with SYN-ACK. Message: 'I hear you, and I am ready.'",
+        "Step 3 (ACK): The Client sends ACK. Message: 'Connection established.' Data transfer begins."
+      ],
+      "attack_vectors": [
+        "TCP Connect Scan (-sT): The attacker performs the full 3-step handshake on every port. It is 100% accurate but very noisy because the server logs the completed connection.",
+        "SYN Flood: An attacker sends step 1 (SYN) millions of times but never does step 3 (ACK), crashing the server."
+      ],
+      "prevention_and_mitigation": [
+        "Stateful Firewalls: Firewalls that track the state of the handshake and drop packets that arrive out of order.",
+        "Connection Logging: Monitoring logs for rapid connection creations from a single IP."
+      ]
+    },
+    {
+      "id": "RECON-02",
+      "title": "SYN 'Stealth' Scan (-sS)",
+      "concept": "This is Nmap's default scan mode. It is called 'Stealth' or 'Half-Open' because the scanner never completes the connection, often bypassing application logs.",
+      "diagram_url": "syn_scan_anim.json",
+      "technical_mechanics": [
+        "The Hook: The scanner sends a SYN packet (like a normal user).",
+        "The Response: The server replies with SYN-ACK (Port is Open) or RST (Port is Closed).",
+        "The Escape: Instead of sending the final ACK, the scanner sends a RST (Reset) to abruptly kill the conversation.",
+        "Result: The application layer never sees a connection, so it often doesn't log it."
+      ],
+      "attack_vectors": [
+        "Mapping Attack Surface: Quickly finding open web servers (80), databases (3306), or SSH (22) without leaving a clear trace in application logs.",
+        "Bypassing Simple Filters: Some older firewalls only block established connections, missing these half-open probes."
+      ],
+      "prevention_and_mitigation": [
+        "IDS/IPS: Intrusion Detection Systems (like Snort) look for the specific pattern of 'SYN then RST' to identify scanners.",
+        "Next-Gen Firewalls: Modern firewalls detect scanning behavior regardless of connection state."
+      ]
+    },
+    {
+      "id": "RECON-03",
+      "title": "UDP Scanning (-sU)",
+      "concept": "UDP is a 'connectionless' protocol (used by DNS, DHCP, VPNs). It does not have a handshake, making it much harder and slower to scan.",
+      "diagram_url": "udp_scan_anim.json",
+      "technical_mechanics": [
+        "Fire and Forget: The scanner sends an empty UDP packet to a port.",
+        "The Silence: If no reply comes back, the port is either 'Open' or 'Filtered' (Firewall dropped it). Nmap can't tell the difference easily.",
+        "The Error: If the server replies with an ICMP 'Port Unreachable' error, the port is definitely 'Closed'."
+      ],
+      "attack_vectors": [
+        "DNS Amplification: Finding open DNS resolvers to use in DDoS attacks.",
+        "IoT Discovery: Many IoT devices communicate solely over UDP protocols."
+      ],
+      "prevention_and_mitigation": [
+        "ICMP Rate Limiting: OSs limit how many 'Port Unreachable' errors they send per second (e.g., 1 per second). This makes UDP scanning extremely slow.",
+        "Deny All: Configure firewalls to drop all UDP traffic except for specific allowed services."
+      ]
+    },
+    {
+      "id": "RECON-04",
+      "title": "OS Fingerprinting (-O)",
+      "concept": "Nmap can often guess exactly what operating system (Windows 10, Linux 2.6, iOS) a target is running by analyzing how its TCP/IP stack behaves.",
+      "diagram_url": "os_fingerprint_anim.json",
+      "technical_mechanics": [
+        "The Query: Nmap sends malformed or weird packets (e.g., a packet with 'impossible' flags set).",
+        "The Quirk: Windows handles these weird packets slightly differently than Linux or MacOS.",
+        "The Match: Nmap compares the response quirks to a massive database of OS signatures to find a match."
+      ],
+      "attack_vectors": [
+        "Targeted Exploits: If an attacker knows you are running 'Windows Server 2008', they will only attempt exploits that work on that version.",
+        "Network Inventory: Identifying unauthorized devices (like a rogue Raspberry Pi) on a corporate network."
+      ],
+      "prevention_and_mitigation": [
+        "TCP/IP Hardening: modifying the OS network configuration to behave generically.",
+        "Firewall Scrubbing: Some firewalls rewrite packets to normalize them, hiding the quirks of the internal server."
+      ]
+    },
+    {
+      "id": "RECON-05",
+      "title": "Port States: Open, Closed, Filtered",
+      "concept": "When reading a scan report, understanding the status is key. It tells you not just about the service, but about the firewall in between.",
+      "technical_mechanics": [
+        "OPEN: An application is actively listening and accepting connections. (High Risk)",
+        "CLOSED: The packet reached the OS, but no application is listening on that port. (Low Risk)",
+        "FILTERED: The packet was dropped by a firewall. Nmap doesn't know if the port is open or closed. (Frustrating for attackers)"
+      ],
+      "attack_vectors": [
+        "Firewall Mapping: If ports 80 and 443 are 'Open' but port 22 is 'Filtered', the attacker knows a firewall is present and actively managing traffic.",
+        "Evasion: Attackers try to find 'Open' ports that shouldn't be (like a dev server on port 8080) to bypass the firewall."
+      ],
+      "prevention_and_mitigation": [
+        "Rule of Least Privilege: Ensure only absolutely necessary ports are 'Open'.",
+        "Stealth Mode: Configure firewalls to silently drop packets (DROP) rather than rejecting them (REJECT), forcing the scanner to wait for a timeout."
+      ]
+    }
+  ]
+}
