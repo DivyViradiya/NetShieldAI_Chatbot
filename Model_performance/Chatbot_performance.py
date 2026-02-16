@@ -3,8 +3,9 @@ import evaluate
 import pandas as pd
 
 # Paths
-pred_dir = r"D:\VulnScanAI_Chatbot\Model_performance\predictions"
-ref_dir = r"D:\VulnScanAI_Chatbot\Model_performance\references"
+current_dir = os.path.dirname(os.path.abspath(__file__))
+pred_dir = os.path.join(current_dir, "predictions")
+ref_dir = os.path.join(current_dir, "references")
 num_tests = 10  # adjust based on how many tests you have
 
 # Load metrics

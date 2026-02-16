@@ -4,6 +4,7 @@ from dotenv import load_dotenv
 import google.generativeai as genai
 import logging
 import asyncio
+import json
 
 # Setup logging
 logger = logging.getLogger(__name__)
@@ -12,7 +13,7 @@ logger = logging.getLogger(__name__)
 env_path = Path('..') / '.env'
 load_dotenv(dotenv_path=env_path)
 
-def load_model(api_key: str = None, model_name: str = "gemini-1.5-flash", tools: list = None, **kwargs):
+def load_model(api_key: str = None, model_name: str = "gemini-2.5-flash", tools: list = None, **kwargs):
     """Loads and configures the Gemini model with optional tools."""
     key_to_use = api_key or kwargs.get('api_key') or os.environ.get("GEMINI_API_KEY")
     if not key_to_use:
@@ -40,9 +41,10 @@ async def generate_response(model, prompt: str, max_tokens: int = 8192) -> dict:
         if response.prompt_feedback and response.prompt_feedback.block_reason:
             return {"text": "I cannot answer this query due to safety restrictions.", "tool_call": None}
 
-        # Handle Function Calls
+        # Handle Function Calls and Text
         tool_call = None
-        # Check if the model called a function
+        full_text = ""
+        
         if response.candidates and response.candidates[0].content.parts:
             for part in response.candidates[0].content.parts:
                 if part.function_call:
@@ -50,10 +52,11 @@ async def generate_response(model, prompt: str, max_tokens: int = 8192) -> dict:
                         "name": part.function_call.name,
                         "args": dict(part.function_call.args)
                     }
-                    break
+                if part.text:
+                    full_text += part.text
 
         return {
-            "text": response.text.strip() if response.candidates[0].content.parts[0].text else "Initiating scan...",
+            "text": full_text.strip() if full_text else "Initiating scan...",
             "tool_call": tool_call
         }
     except Exception as e:
@@ -76,7 +79,7 @@ async def generate_response_stream(model, prompt: str, max_tokens: int = 8192):
                 for part in chunk.candidates[0].content.parts:
                     if part.function_call:
                         # We yield a special JSON string for the tool call
-                        yield f"__TOOL_CALL__:{part.function_call.name}:{dict(part.function_call.args)}"
+                        yield f"__TOOL_CALL__:{part.function_call.name}:{json.dumps(dict(part.function_call.args))}"
                     elif part.text:
                         yield part.text
                 

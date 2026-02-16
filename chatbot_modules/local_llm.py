@@ -11,10 +11,15 @@ logger = logging.getLogger(__name__)
 def load_model(
     model_id: str = "bartowski/Qwen2.5-Coder-3B-Instruct-GGUF", 
     model_basename: str = "Qwen2.5-Coder-3B-Instruct-Q4_K_M.gguf", 
-    local_dir: str = r"D:\VulnScanAI_Chatbot\pretrained_language_model"
+    local_dir: str = None
 ) -> Llama:
     """Loads the local Qwen GGUF model."""
     
+    if local_dir is None:
+        # Default to a 'pretrained_language_model' folder in the current project
+        current_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        local_dir = os.path.join(current_dir, "pretrained_language_model")
+
     if not os.path.exists(local_dir):
         os.makedirs(local_dir)
         

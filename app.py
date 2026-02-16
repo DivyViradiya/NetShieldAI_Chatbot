@@ -92,7 +92,8 @@ class ChatMessage(BaseModel):
     user_id: str 
     verbosity: Optional[str] = "standard" # concise, standard, detailed
     is_incognito: Optional[bool] = False
-    
+    llm_mode: Optional[str] = config.DEFAULT_LLM_MODE
+
 class ClearChatRequest(BaseModel):
     """Pydantic model for clearing a chat session (Legacy/Full Reset)."""
     session_id: str
@@ -165,21 +166,22 @@ def _init_global_llm_and_rag():
             except Exception as e:
                 logger.error(f"Failed to initialize Local LLM: {e}")
 
-            # --- Initialize Gemini LLM with Tools ---
+            # --- Initialize Gemini Models with Tools ---
             if config.GEMINI_API_KEY:
-                try:
-                    model_name_to_use = getattr(config, 'GEMINI_MODEL_NAME', 'gemini-1.5-flash')
-                    
-                    gemini_model_instance = gemini_llm_module.load_model(
-                        api_key=config.GEMINI_API_KEY,
-                        model_name=model_name_to_use,
-                        tools=SECURITY_TOOLS
-                    )
-                    _llm_instances_global["gemini"] = gemini_model_instance
-                    _llm_generate_funcs_global["gemini"] = gemini_llm_module.generate_response
-                    logger.info(f"Gemini AI Agent initialized: {model_name_to_use}")
-                except Exception as e:
-                    logger.warning(f"Failed to initialize Gemini AI Agent: {e}")
+                for m_name in config.SUPPORTED_LLM_MODES:
+                    if m_name == "local":
+                        continue
+                    try:
+                        gemini_model_instance = gemini_llm_module.load_model(
+                            api_key=config.GEMINI_API_KEY,
+                            model_name=m_name,
+                            tools=SECURITY_TOOLS
+                        )
+                        _llm_instances_global[m_name] = gemini_model_instance
+                        _llm_generate_funcs_global[m_name] = gemini_llm_module.generate_response
+                        logger.info(f"Gemini Model initialized: {m_name}")
+                    except Exception as e:
+                        logger.warning(f"Failed to initialize Gemini Model {m_name}: {e}")
             else:
                 logger.info("Skipping Gemini LLM initialization: GEMINI_API_KEY not found.")
 
@@ -261,52 +263,49 @@ async def shutdown_event():
 # --- IMPROVED REPORT DETECTION LOGIC ---
 def detect_report_type_from_content(text: str) -> str:
     """
-    Identifies the report type by scanning ONLY the first line (Header) of the PDF.
-    This prevents false positives if keywords appear in the body text.
+    Identifies the report type by scanning the first few lines of the text.
+    Uses multi-line keyword matching for robustness.
     """
     if not text:
         logger.warning("Detection failed: Extracted text is empty.")
         return "generic_pdf"
     
-    # --- ISOLATE HEADER (FIRST LINE) ---
-    # Split by newlines and take the first non-empty line
-    lines = [line.strip() for line in text.splitlines() if line.strip()]
-    first_line = lines[0].lower() if lines else ""
+    # Scan first 10 lines for performance and accuracy
+    lines = [line.strip().lower() for line in text.splitlines() if line.strip()][:10]
+    full_header_context = " ".join(lines)
 
-    # Normalize: Replace multiple spaces/tabs with single space within that line
-    clean_header = re.sub(r'\s+', ' ', first_line).strip()
-
-    # --- DEBUGGING ---
-    # logger.info(f"DEBUG - PDF Header Detection: '{clean_header}'") 
-
-    # --- HEADER MAPPING ---
+    # --- HEADER MAPPING (Ordered by specificity) ---
     
-    # 1. Kill Chain (Exact Match Preference)
-    if "kill chain analysis" in clean_header:
+    # 1. Kill Chain
+    if "kill chain" in full_header_context:
         return "killchain"
 
-    # 2. NMAP
-    if "network Scan" in clean_header or "nmap scan report" in clean_header:
+    # 2. NMAP (Checking for common headers found in the PDF templates)
+    if "network scan" in full_header_context or "nmap scan report" in full_header_context or "nmap" in full_header_context:
         return "nmap"
     
-    # 3. PCAP
-    if "network traffic" in clean_header:
+    # 3. PCAP / Sniffer
+    if "network traffic" in full_header_context or "tshark" in full_header_context or "packet sniffer" in full_header_context:
         return "pcap"
     
     # 4. ZAP
-    if "web vulnerability" in clean_header or "owasp zap" in clean_header:
+    if "web vulnerability" in full_header_context or "owasp zap" in full_header_context:
         return "zap"
     
     # 5. SSL
-    if "ssl/tls assessment" in clean_header or "sslscan" in clean_header:
+    if "ssl/tls assessment" in full_header_context or "sslscan" in full_header_context:
         return "sslscan"
     
     # 6. SQL Injection
-    if "sql injection security" in clean_header or "sqlmap" in clean_header:
+    if "sql injection security" in full_header_context or "sqlmap" in full_header_context:
         return "sql"
 
+    # 7. SAST / Semgrep
+    if "static analysis" in full_header_context or "semgrep" in full_header_context:
+        return "semgrep"
+
     # Fallback
-    logger.info(f"No known report header found in: '{clean_header}'. Defaulting to generic_pdf.")
+    logger.info(f"No specific report header matched in first 10 lines. Defaulting to generic_pdf.")
     return "generic_pdf"
     
 
@@ -484,18 +483,91 @@ def is_report_specific_question_web(question: str, report_data: Dict[str, Any]) 
     return False
 
 
+# --- NEW HELPER: Parse Local LLM Text for Actions ---
+def parse_local_llm_action(text: str) -> Optional[Dict[str, Any]]:
+    """
+    Attempts to heuristically detect if the local LLM is trying to trigger a scan
+    by looking for keywords and targets in its response.
+    """
+    text_lower = text.lower()
+    
+    # Helper to find potential targets (IPs, Domains, or URLs)
+    def find_target(content: str):
+        # 1. Try to find a full URL with scheme
+        url_match = re.search(r'(https?://[^\s\)]+)', content)
+        if url_match:
+            return url_match.group(1).rstrip('.:,')
+        
+        # 2. Try to find something that looks like a domain or IP after common labels
+        label_match = re.search(r'(target|url|host|ip|domain)\s*[:=]\s*([a-zA-Z0-9.-]+\.[a-zA-Z]{2,}|(\d{1,3}\.){3}\d{1,3})', content, re.IGNORECASE)
+        if label_match:
+            return label_match.group(2).rstrip('.:,')
+            
+        # 3. Fallback to general domain/IP regex
+        gen_match = re.search(r'([a-zA-Z0-9.-]+\.[a-zA-Z]{2,}|(\d{1,3}\.){3}\d{1,3})', content)
+        if gen_match:
+            return gen_match.group(1).rstrip('.:,')
+        return None
+
+    target = find_target(text)
+
+    # 1. ZAP Scan Detection
+    if "zap" in text_lower or "web application scan" in text_lower:
+        if target:
+            # Ensure URL has a scheme for ZAP
+            final_url = target if target.startswith("http") else f"http://{target}"
+            return {
+                "name": "zap_scan",
+                "args": {"target_url": final_url, "scan_type": "Quick Scan"},
+                "monitor_mode": "terminal"
+            }
+
+    # 2. Nmap Scan Detection
+    if "nmap" in text_lower or "network scan" in text_lower or "port scan" in text_lower:
+        if target:
+            # Strip scheme if present for Nmap
+            clean_ip = re.sub(r'^https?://', '', target)
+            return {
+                "name": "nmap_scan",
+                "args": {"target_ip": clean_ip, "scan_type": "default"},
+                "monitor_mode": "terminal"
+            }
+
+    # 3. SSL Scan Detection
+    if "ssl" in text_lower or "tls" in text_lower or "certificate check" in text_lower:
+        if target:
+            clean_host = re.sub(r'^https?://', '', target).split('/')[0]
+            return {
+                "name": "ssl_scan",
+                "args": {"target_host": clean_host},
+                "monitor_mode": "terminal"
+            }
+
+    # 4. SQL Injection Detection
+    if "sql injection" in text_lower or "sqli" in text_lower:
+        if target:
+            final_url = target if target.startswith("http") else f"http://{target}"
+            return {
+                "name": "sql_injection_scan",
+                "args": {"target_url": final_url, "scan_mode": "quick"},
+                "monitor_mode": "terminal"
+            }
+
+    return None
+
 @app.post("/upload_report")
 async def upload_report(
     file: Optional[UploadFile] = File(None, alias="file"),
     llm_mode: str = Query(config.DEFAULT_LLM_MODE, description=f"Choose LLM mode: {config.SUPPORTED_LLM_MODES}"),
     user_id: str = Query(..., description="Unique user identifier from the client"),
+    session_id: Optional[str] = Query(None, description="Existing session ID to attach this report to"),
     file_path: Optional[str] = Query(None, description="Direct absolute path to the PDF on the server's disk")
 ):
     """
     Handles file uploads OR path-based analysis. 
     Path-based analysis (file_path) is faster as it skips binary transfer.
     """
-    logger.info(f"Report Request - User: {user_id}, Path-based: {bool(file_path)}")
+    logger.info(f"Report Request - User: {user_id}, Session: {session_id}, Path-based: {bool(file_path)}")
 
     # 1. Validation: We need EITHER a file upload OR a local file path
     if not file and not file_path:
@@ -552,9 +624,12 @@ async def upload_report(
         # 2. Run detection on the extracted text
         report_type = detect_report_type_from_content(extracted_text)
         
-        # GENERATE NEW SESSION ID FOR THIS REPORT
-        session_id = str(uuid.uuid4())
-        logger.info(f"New session {session_id} - Type: {report_type}")
+        # USE PROVIDED SESSION ID OR GENERATE NEW ONE
+        if not session_id:
+            session_id = str(uuid.uuid4())
+            logger.info(f"New session {session_id} - Type: {report_type}")
+        else:
+            logger.info(f"Updating session {session_id} with report type: {report_type}")
 
         parsed_data = None
         
@@ -605,26 +680,49 @@ async def upload_report(
                     report_type=report_type,
                     pinecone_namespace=report_namespace,
                     parsed_report_data=parsed_data,
-                    title=initial_title
+                    title=initial_title,
+                    status="ACTIVE" # Clear STATUS_WAITING_FOR_REPORT
                 )
             except Exception as e:
                  logger.error(f"Failed to persist session to database: {e}")
 
-            # --- Generate Summary ---
-            llm_instance = _llm_instances_global.get(llm_mode)
-            llm_generate_func = _llm_generate_funcs_global.get(llm_mode)
+            # --- Generate Summary with Failover ---
+            initial_summary = "Report parsed successfully, but summarization failed."
             
-            initial_summary = await execute_with_retry(
-                summarize_report_with_llm, 
-                llm_instance, 
-                llm_generate_func, 
-                parsed_data, 
-                report_type
-            )
+            requested_mode = llm_mode
+            if requested_mode in config.LLM_FAILOVER_PRIORITY:
+                idx = config.LLM_FAILOVER_PRIORITY.index(requested_mode)
+                failover_sequence = config.LLM_FAILOVER_PRIORITY[idx:]
+            else:
+                failover_sequence = [requested_mode] + config.LLM_FAILOVER_PRIORITY
+
+            for current_mode in failover_sequence:
+                llm_instance = _llm_instances_global.get(current_mode)
+                llm_generate_func = _llm_generate_funcs_global.get(current_mode)
+                
+                if not llm_instance or not llm_generate_func:
+                    continue
+
+                try:
+                    initial_summary = await execute_with_retry(
+                        summarize_report_with_llm, 
+                        llm_instance, 
+                        llm_generate_func, 
+                        parsed_data, 
+                        report_type
+                    )
+                    if current_mode != requested_mode:
+                        initial_summary = f"[Note: Summary generated using {current_mode} failsafe]\n\n" + initial_summary
+                    break
+                except Exception as e:
+                    logger.warning(f"Summarization failed for {current_mode}: {e}. Trying failsafe...")
+                    continue
             
-            db_utils.add_message(session_id, "assistant", initial_summary)
+            # Inject report content info into history (Role: system)
+            report_msg = f"SYSTEM_NOTIFICATION: Scan Complete. {report_type.upper()} Report successfully synchronized. Summary: {initial_summary}"
+            db_utils.add_message(session_id, "system", report_msg)
             
-            return JSONResponse(content={'success': True, 'summary': initial_summary, 'report_loaded': True, 'session_id': session_id})
+            return JSONResponse(content={'success': True, 'summary': initial_summary, 'report_loaded': True, 'session_id': session_id, 'llm_mode': current_mode})
         else:
             logger.error(f"Failed to parse data from {original_filename}.")
             return JSONResponse(
@@ -661,21 +759,16 @@ async def chat(chat_message: ChatMessage):
     if session_id:
         session_data = db_utils.get_session_by_id(session_id)
         
-    # 2. If no ID or not found, try getting the user's last active session
+    # 2. If still no session (or session_id was null), create a fresh "General Chat" session
     if not session_data:
-        session_data = db_utils.get_user_session(user_id)
-
-    # 3. If still no session, create a fresh "General Chat" session
-    if not session_data:
-        logger.info(f"No existing session found for user {user_id}. Creating new general session.")
-        new_session_id = str(uuid.uuid4())
+        logger.info(f"Creating new session for user {user_id}.")
+        session_id = str(uuid.uuid4())
         db_utils.update_or_create_session(
             user_id=user_id, 
-            session_id=new_session_id, 
+            session_id=session_id, 
             report_type="General",
             title="General Chat"
         )
-        session_id = new_session_id
         session_data = db_utils.get_session_by_id(session_id)
     else:
         # If we found data, ensure we use its ID
@@ -688,12 +781,13 @@ async def chat(chat_message: ChatMessage):
     current_parsed_report = session_data.get('parsed_report_data')
     current_report_type = session_data.get('report_type')
     current_report_namespace = session_data.get('pinecone_namespace')
+    current_status = session_data.get('status', 'ACTIVE')
     
     # Retrieve chat history from DB
     chat_history_db = db_utils.get_chat_history(session_id, limit=config.CHAT_HISTORY_MAX_TURNS + 2)
     chat_history = [{"role": row['role'], "content": row['content']} for row in chat_history_db]
 
-    llm_mode = config.DEFAULT_LLM_MODE
+    llm_mode = chat_message.llm_mode if chat_message.llm_mode in config.SUPPORTED_LLM_MODES else config.DEFAULT_LLM_MODE
     llm_instance_for_session = _llm_instances_global.get(llm_mode)
     llm_generate_func_for_session = _llm_generate_funcs_global.get(llm_mode)
 
@@ -703,7 +797,21 @@ async def chat(chat_message: ChatMessage):
             detail=f"LLM mode '{llm_mode}' is not initialized."
         )
 
-    logger.info(f"Chat request - Session: {session_id}, Mode: {llm_mode}, Incognito: {is_incognito}")
+    logger.info(f"Chat request - Session: {session_id}, Mode: {llm_mode}, Incognito: {is_incognito}, Status: {current_status}")
+
+    # --- HANDLE SCANNER ANALYSIS TOOL CALL FROM USER ---
+    # If the user is reporting that a scan is complete (usually via frontend auto-call)
+    if "SCAN_COMPLETE_SIGNAL" in user_question:
+        # This is a hidden trigger from the frontend
+        # We can extract the file path if provided
+        # Example: SCAN_COMPLETE_SIGNAL: /path/to/report.pdf
+        parts = user_question.split(":", 1)
+        if len(parts) > 1:
+            file_path = parts[1].strip()
+            # Redirect to upload_report logic (internal call or similar)
+            # For simplicity, we'll just acknowledge and wait for the frontend to call /upload_report
+            # But the prompt says the AI should trigger scanner_analysis.
+            pass
 
     chat_history.append({"role": "user", "content": user_question})
     
@@ -717,6 +825,14 @@ async def chat(chat_message: ChatMessage):
         system_instruction = "System: Provide a very brief, concise answer. Avoid fluff.\n"
     elif verbosity == "detailed":
         system_instruction = "System: Provide a detailed, technical deep-dive response with code examples and step-by-step remediation if applicable.\n"
+
+    # --- Status-Specific Context ---
+    if current_status == "STATUS_WAITING_FOR_REPORT":
+        system_instruction += "System: A security scan is currently running in the terminal. If the user asks about progress, inform them it is still processing and you will analyze it as soon as it finishes.\n"
+
+    # --- Active Report Injection ---
+    if current_parsed_report:
+        system_instruction += f"System: CURRENT ACTIVE REPORT: A {str(current_report_type).upper()} report is already loaded in this session. Prioritize this data for analysis, breakdowns, or recommendations.\n"
 
     # --- Summarization Check ---
     summarized_context_str = ""
@@ -737,10 +853,25 @@ async def chat(chat_message: ChatMessage):
 
     # --- ORCHESTRATOR SYSTEM PROMPT ---
     orchestrator_prompt = (
-        "System: You are the NetShieldAI Security Orchestrator AI Agent. Your mission is to assist users in securing their digital assets.\n"
-        "1. Identify Intent: Look for intent to scan (e.g., 'scan my site', 'nmap this ip').\n"
-        "2. Parameter Gathering: If a tool is needed but parameters are missing, ask for them. DO NOT execute with placeholders.\n"
-        "3. Safety: NEVER scan 'localhost' or '127.0.0.1'.\n"
+        "System: You are the NetShieldAI Security Orchestrator. Your goal is to guide the user through security audits and analyze technical telemetry.\n"
+        "1. Identify Intent: Look for scan requests (Nmap, ZAP, SSL, etc.).\n"
+        "2. Terminal Protocol: When initiating a scan, inform the user: 'Deploying module. You can monitor the live telemetry synchronization below. I will Lightspeed the data upon completion.'\n"
+        "3. Scan Options & Information Structure: When listing scans or providing details, use the following structure for each tool:\n"
+        "   - **Tool Name**\n"
+        "   - **Description**: Concise explanation of what the scan does.\n"
+        "   - **Target Requirements**: Precise target needed (e.g., IP, URL, Host).\n"
+        "   - **Configuration Options**: List of available parameters (e.g., Scan Type, Duration, Profile).\n"
+        "4. Tool Requirements Reference:\n"
+        "   - Nmap Scan: Requires 'target_ip'. Options: Scan Type (default, os, aggressive, etc.), Timing (0-5).\n"
+        "   - ZAP Scan: Requires 'target_url'. Options: Scan Type (Quick, Full).\n"
+        "   - SSL/TLS Scan: Requires 'target_host'.\n"
+        "   - SQL Injection Scan: Requires 'target_url'. Options: Mode (quick, full, deep).\n"
+        "   - Packet Sniffer: Requires 'target_ip'. Options: Duration, Max Packets.\n"
+        "   - API Security Scan: Requires 'target_url' and 'definition_url' (Swagger).\n"
+        "   - Kill Chain Audit: Requires 'target'. Options: Profile (full_audit, stealth, recon_only).\n"
+        "   - Semgrep SAST Scan: Requires 'git_url'.\n"
+        "5. Safety: Prohibit scanning 'localhost' or loopback addresses.\n"
+        "6. Synchronization: When you receive the trigger '[ANALYSIS_TRIGGER]', analyze the summary in 'SYSTEM_NOTIFICATION' and provide a professional breakdown.\n"
     )
 
     llm_prompt_content = orchestrator_prompt + system_instruction
@@ -787,28 +918,87 @@ async def chat(chat_message: ChatMessage):
         for msg in chat_history:
             if msg["role"] == "user":
                 concatenated_prompt += f"User: {msg['content']}\n"
-            elif msg["role"] == "assistant":
+            elif msg["role"] in ["assistant", "ai"]:
                 concatenated_prompt += f"Assistant: {msg['content']}\n"
-            elif msg["role"] == "system":
+            elif msg["role"] in ["system", "system_hidden"]:
                 concatenated_prompt += f"System: {msg['content']}\n"
     
     final_llm_prompt = f"{llm_prompt_content}\n{concatenated_prompt}\nAssistant:"
 
-    try:
-        # Standard chat call now returns a dict {"text": ..., "tool_call": ...}
-        llm_result = await execute_with_retry(
-            llm_generate_func_for_session,
-            llm_instance_for_session, 
-            final_llm_prompt, 
-            max_tokens=config.DEFAULT_MAX_TOKENS
-        )
+    # --- PHASE 2: Generation with Failover ---
+    llm_result = None
+    last_error = None
+    
+    requested_mode = chat_message.llm_mode if chat_message.llm_mode in config.SUPPORTED_LLM_MODES else config.DEFAULT_LLM_MODE
+    
+    # Determine failover sequence
+    if requested_mode in config.LLM_FAILOVER_PRIORITY:
+        idx = config.LLM_FAILOVER_PRIORITY.index(requested_mode)
+        failover_sequence = config.LLM_FAILOVER_PRIORITY[idx:]
+    else:
+        failover_sequence = [requested_mode] + config.LLM_FAILOVER_PRIORITY
+
+    used_mode = requested_mode
+    for mode in failover_sequence:
+        instance = _llm_instances_global.get(mode)
+        gen_func = _llm_generate_funcs_global.get(mode)
         
+        if not instance or not gen_func:
+            continue
+            
+        try:
+            llm_result = await execute_with_retry(
+                gen_func,
+                instance, 
+                final_llm_prompt, 
+                max_tokens=config.DEFAULT_MAX_TOKENS
+            )
+            used_mode = mode
+            break
+        except Exception as e:
+            last_error = e
+            err_msg = str(e).lower()
+            if any(x in err_msg for x in ["429", "quota", "limit", "503", "exhausted"]):
+                logger.warning(f"Model {mode} failed (Quota/Limit). Failing over...")
+                continue
+            else:
+                logger.error(f"Model {mode} failed with error: {e}. Trying failsafe...")
+                continue
+
+    if not llm_result:
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=f"All AI models exhausted or failed. Last error: {last_error}")
+
+    try:
         llm_response_text = llm_result.get("text", "")
         tool_action = llm_result.get("tool_call")
 
+        # If we failed over to local, manually check for actions
+        if used_mode == "local" and not tool_action:
+            local_action = parse_local_llm_action(llm_response_text)
+            if local_action:
+                tool_action = {
+                    "tool": local_action["name"], 
+                    "parameters": local_action["args"], 
+                    "monitor_mode": "terminal"
+                }
+
+        # Inject failsafe notification if we switched models
+        if used_mode != requested_mode:
+            llm_response_text = f"[System: Model {requested_mode} unavailable. Switched to {used_mode} failsafe.]\n\n" + llm_response_text
+
+
+        # Inject monitor_mode for scan tools
+        if tool_action and tool_action.get("name") in ["nmap_scan", "zap_scan", "ssl_scan", "sql_injection_scan", "packet_sniffer", "api_security_scan", "killchain_audit", "semgrep_sast_scan"]:
+            tool_action["monitor_mode"] = "terminal"
+            # Set session status to waiting
+            db_utils.update_or_create_session(user_id=user_id, session_id=session_id, status="STATUS_WAITING_FOR_REPORT")
+
         # --- PHASE 1: Persist Assistant Response (Skip if Incognito) ---
         if not is_incognito:
-            db_utils.add_message(session_id, "assistant", llm_response_text)
+            content_to_save = llm_response_text
+            if tool_action:
+                content_to_save += f"\n__METADATA_ACTION__:{json.dumps(tool_action)}"
+            db_utils.add_message(session_id, "assistant", content_to_save)
         
         return JSONResponse(content={
             'success': True, 
@@ -834,6 +1024,7 @@ async def chat_stream(chat_message: ChatMessage):
     user_id = chat_message.user_id 
     verbosity = chat_message.verbosity
     is_incognito = chat_message.is_incognito
+    llm_mode = chat_message.llm_mode if chat_message.llm_mode in config.SUPPORTED_LLM_MODES else config.DEFAULT_LLM_MODE
 
     # --- 1. Session Retrieval & Creation ---
     session_data = None
@@ -842,18 +1033,14 @@ async def chat_stream(chat_message: ChatMessage):
         session_data = db_utils.get_session_by_id(session_id)
         
     if not session_data:
-        session_data = db_utils.get_user_session(user_id)
-
-    if not session_data:
-        logger.info(f"No existing session found for user {user_id}. Creating new general session.")
-        new_session_id = str(uuid.uuid4())
+        logger.info(f"Creating new session for user {user_id}.")
+        session_id = str(uuid.uuid4())
         db_utils.update_or_create_session(
             user_id=user_id, 
-            session_id=new_session_id, 
+            session_id=session_id, 
             report_type="General",
             title="General Chat"
         )
-        session_id = new_session_id
         session_data = db_utils.get_session_by_id(session_id)
     else:
         session_id = session_data['session_id']
@@ -868,6 +1055,7 @@ async def chat_stream(chat_message: ChatMessage):
     current_parsed_report = session_data.get('parsed_report_data')
     current_report_type = session_data.get('report_type')
     current_report_namespace = session_data.get('pinecone_namespace')
+    current_status = session_data.get('status', 'ACTIVE')
 
     # Fetch History
     chat_history_db = db_utils.get_chat_history(session_id, limit=config.CHAT_HISTORY_MAX_TURNS + 2)
@@ -880,12 +1068,35 @@ async def chat_stream(chat_message: ChatMessage):
     elif verbosity == "detailed":
         system_instruction = "System: Provide a detailed, technical deep-dive response.\n"
 
+    # --- Status-Specific Context ---
+    if current_status == "STATUS_WAITING_FOR_REPORT":
+        system_instruction += "System: A security scan is currently running. Inform the user you will analyze it once complete.\n"
+
+    # --- Active Report Injection ---
+    if current_parsed_report:
+        system_instruction += f"System: CURRENT ACTIVE REPORT: A {str(current_report_type).upper()} report is already loaded. Use it for your response.\n"
+
     # --- ORCHESTRATOR SYSTEM PROMPT ---
     orchestrator_prompt = (
-        "System: You are the NetShieldAI Security Orchestrator AI Agent. Your mission is to assist users in securing their digital assets.\n"
-        "1. Identify Intent: Look for intent to scan (e.g., 'scan my site', 'nmap this ip').\n"
-        "2. Parameter Gathering: If a tool is needed but parameters are missing, ask for them. DO NOT execute with placeholders.\n"
-        "3. Safety: NEVER scan 'localhost' or '127.0.0.1'.\n"
+        "System: You are the NetShieldAI Security Orchestrator. Your goal is to guide the user through security audits and analyze technical telemetry.\n"
+        "1. Identify Intent: Look for scan requests (Nmap, ZAP, SSL, etc.).\n"
+        "2. Terminal Protocol: When initiating a scan, inform the user: 'Deploying module. You can monitor the live telemetry synchronization below. I will Lightspeed the data upon completion.'\n"
+        "3. Scan Options & Information Structure: When listing scans or providing details, use the following structure for each tool:\n"
+        "   - **Tool Name**\n"
+        "   - **Description**: Concise explanation of what the scan does.\n"
+        "   - **Target Requirements**: Precise target needed (e.g., IP, URL, Host).\n"
+        "   - **Configuration Options**: List of available parameters (e.g., Scan Type, Duration, Profile).\n"
+        "4. Tool Requirements Reference:\n"
+        "   - Nmap Scan: Requires 'target_ip'. Options: Scan Type (default, os, aggressive, etc.), Timing (0-5).\n"
+        "   - ZAP Scan: Requires 'target_url'. Options: Scan Type (Quick, Full).\n"
+        "   - SSL/TLS Scan: Requires 'target_host'.\n"
+        "   - SQL Injection Scan: Requires 'target_url'. Options: Mode (quick, full, deep).\n"
+        "   - Packet Sniffer: Requires 'target_ip'. Options: Duration, Max Packets.\n"
+        "   - API Security Scan: Requires 'target_url' and 'definition_url' (Swagger).\n"
+        "   - Kill Chain Audit: Requires 'target'. Options: Profile (full_audit, stealth, recon_only).\n"
+        "   - Semgrep SAST Scan: Requires 'git_url'.\n"
+        "5. Safety: Prohibit scanning 'localhost' or loopback addresses.\n"
+        "6. Synchronization: When you receive the trigger '[ANALYSIS_TRIGGER]', analyze the summary in 'SYSTEM_NOTIFICATION' and provide a professional breakdown.\n"
     )
 
     llm_prompt_content = orchestrator_prompt + system_instruction
@@ -915,57 +1126,112 @@ async def chat_stream(chat_message: ChatMessage):
     # Build Prompt String
     concatenated_prompt = ""
     for msg in chat_history:
-        concatenated_prompt += f"{msg['role'].capitalize()}: {msg['content']}\n"
+        role_label = msg['role'].capitalize()
+        if msg['role'] == 'system_hidden':
+            role_label = 'System'
+        elif msg['role'] in ['assistant', 'ai']:
+            role_label = 'Assistant'
+        
+        concatenated_prompt += f"{role_label}: {msg['content']}\n"
     
     concatenated_prompt += f"User: {user_question}\n"
     final_llm_prompt = f"{llm_prompt_content}\n{concatenated_prompt}\nAssistant:"
 
     # --- 4. Stream Generator ---
     async def response_generator():
-        llm_mode = config.DEFAULT_LLM_MODE
+        nonlocal llm_mode
         full_response_accumulator = ""
         action_found = None
         
-        try:
-            llm_instance = _llm_instances_global.get(llm_mode)
-            if not llm_instance:
-                yield "Error: LLM model not loaded."
-                return
+        requested_mode = chat_message.llm_mode if chat_message.llm_mode in config.SUPPORTED_LLM_MODES else config.DEFAULT_LLM_MODE
+        
+        # Determine failover sequence
+        if requested_mode in config.LLM_FAILOVER_PRIORITY:
+            idx = config.LLM_FAILOVER_PRIORITY.index(requested_mode)
+            failover_sequence = config.LLM_FAILOVER_PRIORITY[idx:]
+        else:
+            failover_sequence = [requested_mode] + config.LLM_FAILOVER_PRIORITY
 
-            if llm_mode == "gemini":
-                async for chunk in gemini_llm_module.generate_response_stream(llm_instance, final_llm_prompt):
-                    if chunk.startswith("__TOOL_CALL__:"):
-                        try:
-                            # Format: __TOOL_CALL__:tool_name:{args_dict}
-                            parts = chunk.split(":", 2)
-                            tool_name = parts[1]
-                            import ast
-                            args = ast.literal_eval(parts[2])
-                            action_found = {"tool": tool_name, "parameters": args}
-                            yield f" [Action: Triggering {tool_name}...]"
-                        except:
-                            logger.error("Failed to parse tool call")
-                    else:
+        used_mode = requested_mode
+        
+        for current_mode in failover_sequence:
+            full_response_accumulator = "" # Reset for each attempt
+            llm_instance = _llm_instances_global.get(current_mode)
+            
+            if not llm_instance:
+                continue
+
+            if used_mode != requested_mode:
+                yield f"\n\n[System: {requested_mode} unavailable. Failing over to {current_mode}...]\n\n"
+
+            try:
+                if current_mode == "local":
+                    sync_gen = local_llm_module.generate_response_stream(llm_instance, final_llm_prompt)
+                    async for chunk in iterate_in_threadpool(sync_gen):
                         full_response_accumulator += chunk
                         yield chunk
-                        await asyncio.sleep(0.01) 
-
-            elif llm_mode == "local":
-                sync_gen = local_llm_module.generate_response_stream(llm_instance, final_llm_prompt)
-                async for chunk in iterate_in_threadpool(sync_gen):
-                    full_response_accumulator += chunk
-                    yield chunk
-            
-            # Save to DB (Skip if Incognito)
-            if full_response_accumulator and not is_incognito:
-                db_utils.add_message(session_id, "assistant", full_response_accumulator)
-            
-            if action_found:
-                yield f"\n__METADATA_ACTION__:{json.dumps(action_found)}"
+                    
+                    # Check for local actions
+                    local_action = parse_local_llm_action(full_response_accumulator)
+                    if local_action:
+                        action_found = {
+                            "tool": local_action["name"], 
+                            "parameters": local_action["args"], 
+                            "monitor_mode": "terminal"
+                        }
+                    break # Success with local
                 
-        except Exception as e:
-            logger.error(f"Streaming Error: {e}")
-            yield f"\n\n[System Error: {str(e)}]"
+                else:
+                    # Gemini Models
+                    error_detected = False
+                    async for chunk in gemini_llm_module.generate_response_stream(llm_instance, final_llm_prompt):
+                        if "[System Error:" in chunk and any(x in chunk.lower() for x in ["429", "quota", "limit", "503", "exhausted"]):
+                            error_detected = True
+                            break
+                        
+                        if chunk.startswith("__TOOL_CALL__:"):
+                            try:
+                                parts = chunk.split(":", 2)
+                                tool_name = parts[1]
+                                args = json.loads(parts[2])
+                                action_found = {"tool": tool_name, "parameters": args, "monitor_mode": "terminal"}
+                            except:
+                                logger.error("Failed to parse tool call")
+                        else:
+                            full_response_accumulator += chunk
+                            yield chunk
+                            await asyncio.sleep(0.01)
+                    
+                    if error_detected:
+                        used_mode = "switching" # Trigger next iteration
+                        continue 
+                    
+                    break # Success with gemini
+
+            except Exception as e:
+                err_msg = str(e).lower()
+                if any(x in err_msg for x in ["429", "quota", "limit", "503", "exhausted"]):
+                    logger.warning(f"Streaming failed for {current_mode}. Failing over...")
+                    used_mode = "switching"
+                    continue
+                else:
+                    logger.error(f"Streaming error for {current_mode}: {e}")
+                    yield f"\n[Error with {current_mode}: {str(e)}]. Trying failsafe..."
+                    used_mode = "switching"
+                    continue
+        
+        # Final cleanup and save
+        if action_found:
+            if action_found["tool"] in ["nmap_scan", "zap_scan", "ssl_scan", "sql_injection_scan", "packet_sniffer", "api_security_scan", "killchain_audit", "semgrep_sast_scan"]:
+                db_utils.update_or_create_session(user_id=user_id, session_id=session_id, status="STATUS_WAITING_FOR_REPORT")
+            yield f"\n__METADATA_ACTION__:{json.dumps(action_found)}"
+            
+        if not is_incognito and full_response_accumulator.strip():
+            content_to_save = full_response_accumulator
+            if action_found:
+                content_to_save += f"\n__METADATA_ACTION__:{json.dumps(action_found)}"
+            db_utils.add_message(session_id, "assistant", content_to_save)
+
 
     return StreamingResponse(response_generator(), media_type="text/plain", headers={"X-Session-ID": session_id})
 
@@ -1062,7 +1328,7 @@ async def get_history(
         return JSONResponse(content={'success': True, 'chat_history': [], 'session_metadata': None})
 
     # 2. Get Messages
-    history = db_utils.get_chat_history(session_id, limit=config.CHAT_HISTORY_MAX_TURNS)
+    history = db_utils.get_chat_history(session_id, limit=100)
     
     # 3. Get Metadata (to restore UI state)
     metadata = {

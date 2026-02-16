@@ -650,6 +650,11 @@ async def summarize_report_with_llm( # Added 'async' keyword here
     try:
         # Call the passed generate_response_func
         llm_response = await generate_response_func(llm_instance, prompt, max_tokens=config.DEFAULT_SUMMARIZE_MAX_TOKENS)
+        
+        # If the response is a dict (Gemini), extract 'text'
+        if isinstance(llm_response, dict):
+            return llm_response.get("text", "")
+            
         return llm_response
     except Exception as e:
         logger.error(f"Error generating LLM response for {report_type} summary: {e}")
@@ -698,6 +703,11 @@ async def summarize_chat_history_segment( # Added 'async' keyword here
     try:
         # Call generate_response_func (now awaited as it's an async function)
         summary_response = await generate_response_func(llm_instance, summarization_prompt, max_tokens=max_tokens)
+        
+        # If the response is a dict (Gemini), extract 'text'
+        if isinstance(summary_response, dict):
+            return summary_response.get("text", "").strip()
+
         return summary_response.strip()
     except Exception as e:
         logger.error(f"Error generating history summary: {e}")

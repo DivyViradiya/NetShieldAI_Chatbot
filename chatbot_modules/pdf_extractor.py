@@ -79,11 +79,12 @@ def save_text_to_file(text: str, output_path: str) -> None:
 
 if __name__ == "__main__":
     # --- Example Usage (for independent testing) ---
+    from .config import PROJECT_ROOT
     logging.basicConfig(level=logging.INFO)
     
     # Use raw string for paths to handle backslashes on Windows
-    dummy_pdf_path = r"D:\NetShieldAI_Chatbot\uploads\killchain_report.pdf"
-    output_txt_path = r"D:\NetShieldAI_Chatbot\uploads\xtracted_text.txt"
+    dummy_pdf_path = os.path.join(PROJECT_ROOT, "uploads", "killchain_report.pdf")
+    output_txt_path = os.path.join(PROJECT_ROOT, "uploads", "xtracted_text.txt")
 
     if os.path.exists(dummy_pdf_path):
         print(f"Attempting to extract text from: {dummy_pdf_path}")

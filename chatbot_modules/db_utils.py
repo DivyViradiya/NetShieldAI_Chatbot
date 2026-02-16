@@ -3,6 +3,11 @@ import json
 import os
 from datetime import datetime
 from typing import List, Dict, Optional, Tuple
+import logging
+
+# Configure logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 # Path to the database file
 DB_FOLDER = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "data")
@@ -18,13 +23,14 @@ def init_db():
 
     # Table: User Sessions
     # CHANGED: session_id is now the PRIMARY KEY (to allow multiple sessions per user)
-    # ADDED: title, is_pinned columns
+    # ADDED: title, is_pinned, status columns
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS user_sessions (
             session_id TEXT PRIMARY KEY,
             user_id TEXT NOT NULL,
             title TEXT,
             is_pinned BOOLEAN DEFAULT 0,
+            status TEXT DEFAULT 'ACTIVE',
             report_type TEXT,
             pinecone_namespace TEXT,
             parsed_report_data TEXT, 
@@ -48,6 +54,18 @@ def init_db():
     ''')
 
     conn.commit()
+
+    # --- MIGRATION: Add 'status' column if it doesn't exist ---
+    try:
+        cursor.execute("PRAGMA table_info(user_sessions)")
+        columns = [column[1] for column in cursor.fetchall()]
+        if 'status' not in columns:
+            logger.info("Migrating database: Adding 'status' column to user_sessions.")
+            cursor.execute("ALTER TABLE user_sessions ADD COLUMN status TEXT DEFAULT 'ACTIVE'")
+            conn.commit()
+    except Exception as e:
+        logger.error(f"Migration error (status column): {e}")
+
     conn.close()
 
 # --- Session Management ---
@@ -101,7 +119,7 @@ def get_user_session(user_id: str) -> Optional[Dict]:
         return data
     return None
 
-def update_or_create_session(user_id: str, session_id: str, report_type: str = None, pinecone_namespace: str = None, parsed_report_data: Dict = None, title: str = None):
+def update_or_create_session(user_id: str, session_id: str, report_type: str = None, pinecone_namespace: str = None, parsed_report_data: Dict = None, title: str = None, status: str = None):
     """Creates a new session or updates an existing one."""
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
@@ -127,6 +145,9 @@ def update_or_create_session(user_id: str, session_id: str, report_type: str = N
         if parsed_data_json:
             query += ", parsed_report_data = ?"
             params.append(parsed_data_json)
+        if status:
+            query += ", status = ?"
+            params.append(status)
         # Only update title if explicitly provided
         if title:
             query += ", title = ?"
@@ -139,12 +160,13 @@ def update_or_create_session(user_id: str, session_id: str, report_type: str = N
     else:
         # Default title if creating new
         final_title = title if title else (f"{report_type.upper()} Analysis" if report_type else "New Chat")
+        final_status = status if status else 'ACTIVE'
         
         # Insert new session
         cursor.execute('''
-            INSERT INTO user_sessions (session_id, user_id, title, report_type, pinecone_namespace, parsed_report_data, last_active, is_pinned)
-            VALUES (?, ?, ?, ?, ?, ?, ?, 0)
-        ''', (session_id, user_id, final_title, report_type, pinecone_namespace, parsed_data_json, timestamp))
+            INSERT INTO user_sessions (session_id, user_id, title, status, report_type, pinecone_namespace, parsed_report_data, last_active, is_pinned)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0)
+        ''', (session_id, user_id, final_title, final_status, report_type, pinecone_namespace, parsed_data_json, timestamp))
         
     conn.commit()
     conn.close()

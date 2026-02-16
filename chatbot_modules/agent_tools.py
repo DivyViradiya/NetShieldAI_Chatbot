@@ -6,7 +6,7 @@ SECURITY_TOOLS = [
         "function_declarations": [
             {
                 "name": "nmap_scan",
-                "description": "Perform a network discovery or vulnerability scan using Nmap.",
+                "description": "Perform an asynchronous network discovery or vulnerability scan using Nmap. Progress will be shown in a live terminal.",
                 "parameters": {
                     "type": "object",
                     "properties": {
@@ -24,7 +24,7 @@ SECURITY_TOOLS = [
             },
             {
                 "name": "zap_scan",
-                "description": "Perform a web application vulnerability scan using OWASP ZAP.",
+                "description": "Perform an asynchronous web application vulnerability scan using OWASP ZAP. Progress will be shown in a live terminal.",
                 "parameters": {
                     "type": "object",
                     "properties": {
@@ -36,7 +36,7 @@ SECURITY_TOOLS = [
             },
             {
                 "name": "ssl_scan",
-                "description": "Check SSL/TLS configuration and identify weak ciphers or deprecated protocols.",
+                "description": "Perform an asynchronous SSL/TLS configuration check. Progress will be shown in a live terminal.",
                 "parameters": {
                     "type": "object",
                     "properties": {
@@ -47,7 +47,7 @@ SECURITY_TOOLS = [
             },
             {
                 "name": "sql_injection_scan",
-                "description": "Perform a specialized SQL injection audit on a target URL.",
+                "description": "Perform an asynchronous specialized SQL injection audit. Progress will be shown in a live terminal.",
                 "parameters": {
                     "type": "object",
                     "properties": {
@@ -59,20 +59,20 @@ SECURITY_TOOLS = [
             },
             {
                 "name": "packet_sniffer",
-                "description": "Capture and analyze network traffic for a specific target IP.",
+                "description": "Perform an asynchronous network traffic capture. Progress will be shown in a live terminal.",
                 "parameters": {
                     "type": "object",
                     "properties": {
                         "target_ip": {"type": "string", "description": "IP address to monitor traffic for."},
-                        "duration": {"type": "integer", "description": "Seconds to capture packets.", "default": 30},
-                        "max_packets": {"type": "integer", "description": "Maximum packets to capture.", "default": 50}
+                        "duration": {"type": "integer", "description": "Seconds to capture packets. Ask user if not specified.", "default": 30},
+                        "max_packets": {"type": "integer", "description": "Maximum packets to capture. Ask user if not specified.", "default": 50}
                     },
                     "required": ["target_ip"]
                 }
             },
             {
                 "name": "api_security_scan",
-                "description": "Perform a security audit on an API using its Swagger/OpenAPI definition.",
+                "description": "Perform an asynchronous API security audit. Progress will be shown in a live terminal.",
                 "parameters": {
                     "type": "object",
                     "properties": {
@@ -84,7 +84,7 @@ SECURITY_TOOLS = [
             },
             {
                 "name": "killchain_audit",
-                "description": "Perform a full-spectrum kill chain analysis (Recon, Weaponization, Exploitation).",
+                "description": "Perform an asynchronous full-spectrum kill chain analysis. Progress will be shown in a live terminal.",
                 "parameters": {
                     "type": "object",
                     "properties": {
@@ -96,13 +96,24 @@ SECURITY_TOOLS = [
             },
             {
                 "name": "semgrep_sast_scan",
-                "description": "Perform a Static Application Security Testing (SAST) scan on a Git repository.",
+                "description": "Perform an asynchronous Static Application Security Testing (SAST) scan. Progress will be shown in a live terminal.",
                 "parameters": {
                     "type": "object",
                     "properties": {
                         "git_url": {"type": "string", "description": "The full Git repository URL to audit."}
                     },
                     "required": ["git_url"]
+                }
+            },
+            {
+                "name": "scanner_analysis",
+                "description": "Automatically analyze the results of a completed scan and provide a detailed security summary.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "file_path": {"type": "string", "description": "The path to the generated report PDF file."}
+                    },
+                    "required": ["file_path"]
                 }
             }
         ]

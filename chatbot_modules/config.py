@@ -6,8 +6,25 @@ dotenv.load_dotenv()
 # Define the base directory for the project.
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
-DEFAULT_LLM_MODE = "gemini"
-SUPPORTED_LLM_MODES = ["local", "gemini"]
+DEFAULT_LLM_MODE = "gemini-2.5-flash"
+SUPPORTED_LLM_MODES = [
+    "gemini-2.5-flash-lite", 
+    "gemini-2.5-flash", 
+    "gemini-2.5-pro", 
+    "gemini-3-flash-preview", 
+    "gemini-3-pro-preview", 
+    "local"
+]
+
+# Failover Priority List (Order of attempt if one fails)
+LLM_FAILOVER_PRIORITY = [
+    "gemini-2.5-flash-lite",
+    "gemini-2.5-flash",
+    "gemini-2.5-pro",
+    "gemini-3-flash-preview",
+    "gemini-3-pro-preview",
+    "local"
+]
 
 # --- LLM Model Configuration ---
 # Local LLM (llama-cpp-python)
@@ -18,11 +35,6 @@ LLM_MODEL_DIR = os.path.join(PROJECT_ROOT, "pretrained_language_model")
 # Gemini API Configuration
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
 
-# --- CRITICAL FIX: Model Name ---
-# "gemini-3-pro-preview" might not be available to your account or public yet.
-# Use "gemini-1.5-flash" for the best speed/quota balance on Free Tier.
-# Use "gemini-1.5-pro" for higher reasoning capability.
-GEMINI_MODEL_NAME = "gemini-3-flash-preview"
 # --- RAG Configuration ---
 RAG_EMBEDDING_MODEL_PATH = os.path.join(PROJECT_ROOT, "fine_tuned_owasp_model_advanced")
 
@@ -59,6 +71,7 @@ REPORT_SPECIFIC_KEYWORDS = [
     "target", "implications", "remediation steps", "summary", "key findings",
     "this report", "the report", "current report", "this scan", "the scan",
     "on the report", "in this report", "from this scan", "overall posture",
+    "system_notification", "scan complete",
 
     # Tool-Specific Identifiers
     "nikto", "sslscan", "mobsf", "zap", "nmap", "mobsf_android", "mobsf_ios",
