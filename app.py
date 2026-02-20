@@ -474,8 +474,6 @@ def is_report_specific_question_web(question: str, report_data: Dict[str, Any]) 
                 return True
             
             # Helper: Check for common acronyms if they appear in the title (e.g. XSS, CSRF, IDOR)
-            # This handles cases where user asks "Fix XSS" and title is "Cross Site Scripting"
-            # (Assuming the title itself might contain the acronym or the user knows it)
             if "xss" in question_lower and "cross site scripting" in title: return True
             if "sqli" in question_lower and "sql injection" in title: return True
             if "csrf" in question_lower and "cross-site request forgery" in title: return True
@@ -564,29 +562,26 @@ async def upload_report(
     file_path: Optional[str] = Query(None, description="Direct absolute path to the PDF on the server's disk")
 ):
     """
-    Handles file uploads OR path-based analysis. 
+    Handles file uploads OR path-based analysis.
     Path-based analysis (file_path) is faster as it skips binary transfer.
     """
     logger.info(f"Report Request - User: {user_id}, Session: {session_id}, Path-based: {bool(file_path)}")
-
     # 1. Validation: We need EITHER a file upload OR a local file path
     if not file and not file_path:
         return JSONResponse(
             status_code=status.HTTP_200_OK,
             content={'success': False, 'summary': 'No file or file path provided.', 'report_loaded': False}
         )
-    
     # 2. Path-based Logic (SHARED STORAGE)
     if file_path:
         if not os.path.exists(file_path):
-             return JSONResponse(
+            return JSONResponse(
                 status_code=status.HTTP_200_OK,
                 content={'success': False, 'summary': f'File not found on server disk: {file_path}', 'report_loaded': False}
             )
         target_file_to_process = file_path
         original_filename = os.path.basename(file_path)
         is_temporary_file = False # Don't delete files that exist on disk elsewhere
-    
     # 3. Upload-based Logic (TRADITIONAL)
     else:
         if not file.filename or not file.filename.lower().endswith('.pdf'):
@@ -594,12 +589,10 @@ async def upload_report(
                 status_code=status.HTTP_200_OK,
                 content={'success': False, 'summary': 'Invalid file. Please upload a PDF.', 'report_loaded': False}
             )
-        
         filename = f"{uuid.uuid4()}_{file.filename}"
         target_file_to_process = os.path.join(UPLOAD_FOLDER, filename)
         original_filename = file.filename
         is_temporary_file = True # Clean up after processing
-
         try:
             os.makedirs(UPLOAD_FOLDER, exist_ok=True)
             with open(target_file_to_process, "wb") as buffer:
@@ -608,31 +601,24 @@ async def upload_report(
         except Exception as e:
             logger.error(f"Failed to save uploaded file: {e}")
             return JSONResponse(status_code=500, content={'success': False, 'summary': 'Internal server error saving file.'})
-
     if llm_mode not in config.SUPPORTED_LLM_MODES:
-         return JSONResponse(
+        return JSONResponse(
             status_code=status.HTTP_200_OK,
             content={'success': False, 'summary': f"Invalid LLM mode. Supported modes are: {config.SUPPORTED_LLM_MODES}", 'report_loaded': False}
         )
-
     try:
         # --- PROCESSING PIPELINE ---
-        
         # 1. Extract text immediately
         extracted_text = extract_text_from_pdf(target_file_to_process)
-        
         # 2. Run detection on the extracted text
         report_type = detect_report_type_from_content(extracted_text)
-        
         # USE PROVIDED SESSION ID OR GENERATE NEW ONE
         if not session_id:
             session_id = str(uuid.uuid4())
             logger.info(f"New session {session_id} - Type: {report_type}")
         else:
             logger.info(f"Updating session {session_id} with report type: {report_type}")
-
         parsed_data = None
-        
         # 3. Parsing Logic (Dispatch based on detected content)
         if report_type == 'nmap':
             parsed_data = process_nmap_report_file(target_file_to_process)
@@ -652,25 +638,21 @@ async def upload_report(
                 parsed_data = {
                     "raw_text": extracted_text,
                     "scan_metadata": {
-                        "tool": "generic_pdf", 
+                        "tool": "generic_pdf",
                         "filename": original_filename
                     }
                 }
             else:
                 parsed_data = None
-
         if parsed_data:
             report_namespace = None
-            
             # --- RAG: Embed and Store ---
             embedding_model = get_embedding_model_instance()
             pinecone_index = get_pinecone_index_instance()
-
             if embedding_model and pinecone_index:
                 report_namespace = load_report_chunks_and_embeddings(parsed_data, report_type, session_id)
             else:
                 logger.warning("RAG components not available.")
-
             # --- Persist Session to Database ---
             try:
                 initial_title = f"{report_type.upper()} Analysis" if report_type != "generic_pdf" else original_filename
@@ -684,31 +666,26 @@ async def upload_report(
                     status="ACTIVE" # Clear STATUS_WAITING_FOR_REPORT
                 )
             except Exception as e:
-                 logger.error(f"Failed to persist session to database: {e}")
-
+                logger.error(f"Failed to persist session to database: {e}")
             # --- Generate Summary with Failover ---
             initial_summary = "Report parsed successfully, but summarization failed."
-            
             requested_mode = llm_mode
             if requested_mode in config.LLM_FAILOVER_PRIORITY:
                 idx = config.LLM_FAILOVER_PRIORITY.index(requested_mode)
                 failover_sequence = config.LLM_FAILOVER_PRIORITY[idx:]
             else:
                 failover_sequence = [requested_mode] + config.LLM_FAILOVER_PRIORITY
-
             for current_mode in failover_sequence:
                 llm_instance = _llm_instances_global.get(current_mode)
                 llm_generate_func = _llm_generate_funcs_global.get(current_mode)
-                
                 if not llm_instance or not llm_generate_func:
                     continue
-
                 try:
                     initial_summary = await execute_with_retry(
-                        summarize_report_with_llm, 
-                        llm_instance, 
-                        llm_generate_func, 
-                        parsed_data, 
+                        summarize_report_with_llm,
+                        llm_instance,
+                        llm_generate_func,
+                        parsed_data,
                         report_type
                     )
                     if current_mode != requested_mode:
@@ -717,11 +694,9 @@ async def upload_report(
                 except Exception as e:
                     logger.warning(f"Summarization failed for {current_mode}: {e}. Trying failsafe...")
                     continue
-            
             # Inject report content info into history (Role: system)
             report_msg = f"SYSTEM_NOTIFICATION: Scan Complete. {report_type.upper()} Report successfully synchronized. Summary: {initial_summary}"
             db_utils.add_message(session_id, "system", report_msg)
-            
             return JSONResponse(content={'success': True, 'summary': initial_summary, 'report_loaded': True, 'session_id': session_id, 'llm_mode': current_mode})
         else:
             logger.error(f"Failed to parse data from {original_filename}.")
@@ -729,7 +704,6 @@ async def upload_report(
                 status_code=200,
                 content={'success': False, 'summary': "The file could not be parsed.", 'report_loaded': False}
             )
-
     except Exception as e:
         logger.error(f"Unexpected error processing {original_filename}: {e}", exc_info=True)
         return JSONResponse(
@@ -741,31 +715,26 @@ async def upload_report(
         if is_temporary_file and os.path.exists(target_file_to_process):
             os.remove(target_file_to_process)
             logger.info(f"Cleaned up temporary upload: {target_file_to_process}")
-
-
 @app.post("/chat")
 async def chat(chat_message: ChatMessage):
     """Handles user chat messages and returns AI responses (BLOCKING MODE)."""
     user_question = chat_message.message
     session_id = chat_message.session_id
-    user_id = chat_message.user_id 
+    user_id = chat_message.user_id
     verbosity = chat_message.verbosity
     is_incognito = chat_message.is_incognito
-
     # --- PHASE 1: DB Retrieval ---
     session_data = None
-    
     # 1. Try fetching specific session by ID
     if session_id:
         session_data = db_utils.get_session_by_id(session_id)
-        
     # 2. If still no session (or session_id was null), create a fresh "General Chat" session
     if not session_data:
         logger.info(f"Creating new session for user {user_id}.")
         session_id = str(uuid.uuid4())
         db_utils.update_or_create_session(
-            user_id=user_id, 
-            session_id=session_id, 
+            user_id=user_id,
+            session_id=session_id,
             report_type="General",
             title="General Chat"
         )
@@ -773,32 +742,26 @@ async def chat(chat_message: ChatMessage):
     else:
         # If we found data, ensure we use its ID
         session_id = session_data['session_id']
-        # Update timestamp (only if not incognito)
-        if not is_incognito:
-            db_utils.update_or_create_session(user_id=user_id, session_id=session_id)
-
+    # Update timestamp (only if not incognito)
+    if not is_incognito:
+        db_utils.update_or_create_session(user_id=user_id, session_id=session_id)
     # Extract context from DB
     current_parsed_report = session_data.get('parsed_report_data')
     current_report_type = session_data.get('report_type')
     current_report_namespace = session_data.get('pinecone_namespace')
     current_status = session_data.get('status', 'ACTIVE')
-    
     # Retrieve chat history from DB
     chat_history_db = db_utils.get_chat_history(session_id, limit=config.CHAT_HISTORY_MAX_TURNS + 2)
     chat_history = [{"role": row['role'], "content": row['content']} for row in chat_history_db]
-
     llm_mode = chat_message.llm_mode if chat_message.llm_mode in config.SUPPORTED_LLM_MODES else config.DEFAULT_LLM_MODE
     llm_instance_for_session = _llm_instances_global.get(llm_mode)
     llm_generate_func_for_session = _llm_generate_funcs_global.get(llm_mode)
-
     if not llm_instance_for_session or not llm_generate_func_for_session:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail=f"LLM mode '{llm_mode}' is not initialized."
         )
-
     logger.info(f"Chat request - Session: {session_id}, Mode: {llm_mode}, Incognito: {is_incognito}, Status: {current_status}")
-
     # --- HANDLE SCANNER ANALYSIS TOOL CALL FROM USER ---
     # If the user is reporting that a scan is complete (usually via frontend auto-call)
     if "SCAN_COMPLETE_SIGNAL" in user_question:
@@ -812,45 +775,38 @@ async def chat(chat_message: ChatMessage):
             # For simplicity, we'll just acknowledge and wait for the frontend to call /upload_report
             # But the prompt says the AI should trigger scanner_analysis.
             pass
-
     chat_history.append({"role": "user", "content": user_question})
-    
     # --- PHASE 1: Persist User Message (Skip if Incognito) ---
     if not is_incognito:
         db_utils.add_message(session_id, "user", user_question)
-
     # --- Verbosity & System Instruction ---
     system_instruction = ""
     if verbosity == "concise":
         system_instruction = "System: Provide a very brief, concise answer. Avoid fluff.\n"
     elif verbosity == "detailed":
         system_instruction = "System: Provide a detailed, technical deep-dive response with code examples and step-by-step remediation if applicable.\n"
-
     # --- Status-Specific Context ---
     if current_status == "STATUS_WAITING_FOR_REPORT":
         system_instruction += "System: A security scan is currently running in the terminal. If the user asks about progress, inform them it is still processing and you will analyze it as soon as it finishes.\n"
-
     # --- Active Report Injection ---
     if current_parsed_report:
         system_instruction += f"System: CURRENT ACTIVE REPORT: A {str(current_report_type).upper()} report is already loaded in this session. Prioritize this data for analysis, breakdowns, or recommendations.\n"
-
     # --- Summarization Check ---
     summarized_context_str = ""
     if len(chat_history) > config.CHAT_HISTORY_MAX_TURNS:
         logger.info(f"Chat history long. Generating prompt context summary.")
-        segment_to_summarize = chat_history[:-1] 
+        segment_to_summarize = chat_history[:-1]
         try:
             summarized_segment_text = await execute_with_retry(
                 summarize_chat_history_segment,
-                llm_instance_for_session, 
-                llm_generate_func_for_session, 
+                llm_instance_for_session,
+                llm_generate_func_for_session,
                 segment_to_summarize,
                 max_tokens=config.DEFAULT_SUMMARIZE_MAX_TOKENS
             )
             summarized_context_str = f"System: Summary of previous conversation: {summarized_segment_text}\n"
         except Exception as e:
             logger.warning(f"Summarization failed: {e}. using raw history.")
-
     # --- ORCHESTRATOR SYSTEM PROMPT ---
     orchestrator_prompt = (
         "System: You are the NetShieldAI Security Orchestrator. Your goal is to guide the user through security audits and analyze technical telemetry.\n"
@@ -873,43 +829,33 @@ async def chat(chat_message: ChatMessage):
         "5. Safety: Prohibit scanning 'localhost' or loopback addresses.\n"
         "6. Synchronization: When you receive the trigger '[ANALYSIS_TRIGGER]', analyze the summary in 'SYSTEM_NOTIFICATION' and provide a professional breakdown.\n"
     )
-
     llm_prompt_content = orchestrator_prompt + system_instruction
     rag_context = ""
-
     # Determine if Internal RAG is needed
     if current_parsed_report and is_report_specific_question_web(user_question, current_parsed_report):
         logger.info(f"Using Internal RAG context for session {session_id}")
         embedding_model = get_embedding_model_instance()
         pinecone_index = get_pinecone_index_instance()
-
         if current_report_namespace and embedding_model and pinecone_index:
             rag_context = retrieve_internal_rag_context(user_question, current_report_namespace, top_k=config.DEFAULT_RAG_TOP_K)
-            if rag_context:
-                llm_prompt_content += f"Here is some relevant information from the current report:\n{rag_context}\n\n"
-            else:
-                llm_prompt_content += "No specific relevant information found in the current report for this query. "
+        if rag_context:
+            llm_prompt_content += f"Here is some relevant information from the current report:\n{rag_context}\n\n"
         else:
-            llm_prompt_content += "Internal RAG components not available. Answering based on initial summary and general knowledge.\n"
-        
-        llm_prompt_content += f"The user is asking a question related to the previously provided {str(current_report_type).upper()} document/report. Please refer to the content and your previous summary to answer.\n"
+            llm_prompt_content += "No specific relevant information found in the current report for this query. "
     else:
         # External RAG
         logger.info(f"Using External RAG context for session {session_id}")
         embedding_model = get_embedding_model_instance()
         pinecone_index = get_pinecone_index_instance()
-
         if embedding_model and pinecone_index:
-            rag_context = retrieve_rag_context(user_question, top_k=config.DEFAULT_RAG_TOP_K, namespace="owasp-cybersecurity-kb") 
+            rag_context = retrieve_rag_context(user_question, top_k=config.DEFAULT_RAG_TOP_K, namespace="owasp-cybersecurity-kb")
             if rag_context:
                 llm_prompt_content += f"Here is some relevant information from a cybersecurity knowledge base:\n{rag_context}\n\n"
             else:
                 llm_prompt_content += "No specific relevant information found in the knowledge base. "
         else:
             llm_prompt_content += "RAG components not loaded. Answering based on general knowledge.\n"
-
     concatenated_prompt = ""
-    
     if summarized_context_str:
         concatenated_prompt += summarized_context_str
         msg = chat_history[-1]
@@ -922,35 +868,28 @@ async def chat(chat_message: ChatMessage):
                 concatenated_prompt += f"Assistant: {msg['content']}\n"
             elif msg["role"] in ["system", "system_hidden"]:
                 concatenated_prompt += f"System: {msg['content']}\n"
-    
     final_llm_prompt = f"{llm_prompt_content}\n{concatenated_prompt}\nAssistant:"
-
     # --- PHASE 2: Generation with Failover ---
     llm_result = None
     last_error = None
-    
     requested_mode = chat_message.llm_mode if chat_message.llm_mode in config.SUPPORTED_LLM_MODES else config.DEFAULT_LLM_MODE
-    
     # Determine failover sequence
     if requested_mode in config.LLM_FAILOVER_PRIORITY:
         idx = config.LLM_FAILOVER_PRIORITY.index(requested_mode)
         failover_sequence = config.LLM_FAILOVER_PRIORITY[idx:]
     else:
         failover_sequence = [requested_mode] + config.LLM_FAILOVER_PRIORITY
-
     used_mode = requested_mode
     for mode in failover_sequence:
         instance = _llm_instances_global.get(mode)
         gen_func = _llm_generate_funcs_global.get(mode)
-        
         if not instance or not gen_func:
             continue
-            
         try:
             llm_result = await execute_with_retry(
                 gen_func,
-                instance, 
-                final_llm_prompt, 
+                instance,
+                final_llm_prompt,
                 max_tokens=config.DEFAULT_MAX_TOKENS
             )
             used_mode = mode
@@ -964,55 +903,44 @@ async def chat(chat_message: ChatMessage):
             else:
                 logger.error(f"Model {mode} failed with error: {e}. Trying failsafe...")
                 continue
-
     if not llm_result:
         raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=f"All AI models exhausted or failed. Last error: {last_error}")
-
     try:
         llm_response_text = llm_result.get("text", "")
         tool_action = llm_result.get("tool_call")
-
         # If we failed over to local, manually check for actions
         if used_mode == "local" and not tool_action:
             local_action = parse_local_llm_action(llm_response_text)
             if local_action:
                 tool_action = {
-                    "tool": local_action["name"], 
-                    "parameters": local_action["args"], 
+                    "tool": local_action["name"],
+                    "parameters": local_action["args"],
                     "monitor_mode": "terminal"
                 }
-
         # Inject failsafe notification if we switched models
         if used_mode != requested_mode:
             llm_response_text = f"[System: Model {requested_mode} unavailable. Switched to {used_mode} failsafe.]\n\n" + llm_response_text
-
-
         # Inject monitor_mode for scan tools
         if tool_action and tool_action.get("name") in ["nmap_scan", "zap_scan", "ssl_scan", "sql_injection_scan", "packet_sniffer", "api_security_scan", "killchain_audit", "semgrep_sast_scan"]:
             tool_action["monitor_mode"] = "terminal"
-            # Set session status to waiting
-            db_utils.update_or_create_session(user_id=user_id, session_id=session_id, status="STATUS_WAITING_FOR_REPORT")
-
+        # Set session status to waiting
+        db_utils.update_or_create_session(user_id=user_id, session_id=session_id, status="STATUS_WAITING_FOR_REPORT")
         # --- PHASE 1: Persist Assistant Response (Skip if Incognito) ---
         if not is_incognito:
             content_to_save = llm_response_text
             if tool_action:
                 content_to_save += f"\n__METADATA_ACTION__:{json.dumps(tool_action)}"
             db_utils.add_message(session_id, "assistant", content_to_save)
-        
         return JSONResponse(content={
-            'success': True, 
-            'response': llm_response_text, 
+            'success': True,
+            'response': llm_response_text,
             'action': tool_action,
-            'chat_history': db_utils.get_chat_history(session_id), 
+            'chat_history': db_utils.get_chat_history(session_id),
             'session_id': session_id
         })
-
     except Exception as e:
         logger.error(f"Error generating LLM response for session {session_id}: {e}", exc_info=True)
         raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=f'An error occurred while generating response: {e}')
-
-
 # --- NEW STREAMING CHAT ENDPOINT ---
 @app.post("/chat_stream")
 async def chat_stream(chat_message: ChatMessage):
@@ -1021,61 +949,51 @@ async def chat_stream(chat_message: ChatMessage):
     """
     user_question = chat_message.message
     session_id = chat_message.session_id
-    user_id = chat_message.user_id 
+    user_id = chat_message.user_id
     verbosity = chat_message.verbosity
     is_incognito = chat_message.is_incognito
     llm_mode = chat_message.llm_mode if chat_message.llm_mode in config.SUPPORTED_LLM_MODES else config.DEFAULT_LLM_MODE
-
     # --- 1. Session Retrieval & Creation ---
     session_data = None
-    
     if session_id:
         session_data = db_utils.get_session_by_id(session_id)
-        
     if not session_data:
         logger.info(f"Creating new session for user {user_id}.")
         session_id = str(uuid.uuid4())
         db_utils.update_or_create_session(
-            user_id=user_id, 
-            session_id=session_id, 
+            user_id=user_id,
+            session_id=session_id,
             report_type="General",
             title="General Chat"
         )
         session_data = db_utils.get_session_by_id(session_id)
     else:
         session_id = session_data['session_id']
-        if not is_incognito:
-            db_utils.update_or_create_session(user_id=user_id, session_id=session_id)
-
+    if not is_incognito:
+        db_utils.update_or_create_session(user_id=user_id, session_id=session_id)
     # --- 2. Persist User Message Immediately (Skip if Incognito) ---
     if not is_incognito:
         db_utils.add_message(session_id, "user", user_question)
-
     # --- 3. Build Context ---
     current_parsed_report = session_data.get('parsed_report_data')
     current_report_type = session_data.get('report_type')
     current_report_namespace = session_data.get('pinecone_namespace')
     current_status = session_data.get('status', 'ACTIVE')
-
     # Fetch History
     chat_history_db = db_utils.get_chat_history(session_id, limit=config.CHAT_HISTORY_MAX_TURNS + 2)
     chat_history = [{"role": row['role'], "content": row['content']} for row in chat_history_db]
-    
     # System Instruction
     system_instruction = ""
     if verbosity == "concise":
         system_instruction = "System: Provide a very brief, concise answer. Avoid fluff.\n"
     elif verbosity == "detailed":
         system_instruction = "System: Provide a detailed, technical deep-dive response.\n"
-
     # --- Status-Specific Context ---
     if current_status == "STATUS_WAITING_FOR_REPORT":
         system_instruction += "System: A security scan is currently running. Inform the user you will analyze it once complete.\n"
-
     # --- Active Report Injection ---
     if current_parsed_report:
         system_instruction += f"System: CURRENT ACTIVE REPORT: A {str(current_report_type).upper()} report is already loaded. Use it for your response.\n"
-
     # --- ORCHESTRATOR SYSTEM PROMPT ---
     orchestrator_prompt = (
         "System: You are the NetShieldAI Security Orchestrator. Your goal is to guide the user through security audits and analyze technical telemetry.\n"
@@ -1098,31 +1016,25 @@ async def chat_stream(chat_message: ChatMessage):
         "5. Safety: Prohibit scanning 'localhost' or loopback addresses.\n"
         "6. Synchronization: When you receive the trigger '[ANALYSIS_TRIGGER]', analyze the summary in 'SYSTEM_NOTIFICATION' and provide a professional breakdown.\n"
     )
-
     llm_prompt_content = orchestrator_prompt + system_instruction
     rag_context = ""
-
     # RAG Logic
     if current_parsed_report and is_report_specific_question_web(user_question, current_parsed_report):
         embedding_model = get_embedding_model_instance()
         pinecone_index = get_pinecone_index_instance()
-
         if current_report_namespace and embedding_model and pinecone_index:
             rag_context = retrieve_internal_rag_context(user_question, current_report_namespace, top_k=config.DEFAULT_RAG_TOP_K)
-            if rag_context:
-                llm_prompt_content += f"Here is some relevant information from the current report:\n{rag_context}\n\n"
-        
-        llm_prompt_content += f"The user is asking a question related to the previously provided {str(current_report_type).upper()} document/report.\n"
+        if rag_context:
+            llm_prompt_content += f"Here is some relevant information from the current report:\n{rag_context}\n\n"
+            llm_prompt_content += f"The user is asking a question related to the previously provided {str(current_report_type).upper()} document/report.\n"
     else:
         # External RAG
         embedding_model = get_embedding_model_instance()
         pinecone_index = get_pinecone_index_instance()
-
         if embedding_model and pinecone_index:
-            rag_context = retrieve_rag_context(user_question, top_k=config.DEFAULT_RAG_TOP_K, namespace="owasp-cybersecurity-kb") 
+            rag_context = retrieve_rag_context(user_question, top_k=config.DEFAULT_RAG_TOP_K, namespace="owasp-cybersecurity-kb")
             if rag_context:
                 llm_prompt_content += f"Here is some relevant information from a cybersecurity knowledge base:\n{rag_context}\n\n"
-
     # Build Prompt String
     concatenated_prompt = ""
     for msg in chat_history:
@@ -1131,56 +1043,44 @@ async def chat_stream(chat_message: ChatMessage):
             role_label = 'System'
         elif msg['role'] in ['assistant', 'ai']:
             role_label = 'Assistant'
-        
         concatenated_prompt += f"{role_label}: {msg['content']}\n"
-    
     concatenated_prompt += f"User: {user_question}\n"
     final_llm_prompt = f"{llm_prompt_content}\n{concatenated_prompt}\nAssistant:"
-
     # --- 4. Stream Generator ---
     async def response_generator():
         nonlocal llm_mode
         full_response_accumulator = ""
         action_found = None
-        
         requested_mode = chat_message.llm_mode if chat_message.llm_mode in config.SUPPORTED_LLM_MODES else config.DEFAULT_LLM_MODE
-        
         # Determine failover sequence
         if requested_mode in config.LLM_FAILOVER_PRIORITY:
             idx = config.LLM_FAILOVER_PRIORITY.index(requested_mode)
             failover_sequence = config.LLM_FAILOVER_PRIORITY[idx:]
         else:
             failover_sequence = [requested_mode] + config.LLM_FAILOVER_PRIORITY
-
         used_mode = requested_mode
-        
         for current_mode in failover_sequence:
             full_response_accumulator = "" # Reset for each attempt
             llm_instance = _llm_instances_global.get(current_mode)
-            
             if not llm_instance:
                 continue
-
             if used_mode != requested_mode:
                 yield f"\n\n[System: {requested_mode} unavailable. Failing over to {current_mode}...]\n\n"
-
             try:
                 if current_mode == "local":
                     sync_gen = local_llm_module.generate_response_stream(llm_instance, final_llm_prompt)
                     async for chunk in iterate_in_threadpool(sync_gen):
                         full_response_accumulator += chunk
                         yield chunk
-                    
                     # Check for local actions
                     local_action = parse_local_llm_action(full_response_accumulator)
                     if local_action:
                         action_found = {
-                            "tool": local_action["name"], 
-                            "parameters": local_action["args"], 
+                            "tool": local_action["name"],
+                            "parameters": local_action["args"],
                             "monitor_mode": "terminal"
                         }
                     break # Success with local
-                
                 else:
                     # Gemini Models
                     error_detected = False
@@ -1188,7 +1088,6 @@ async def chat_stream(chat_message: ChatMessage):
                         if "[System Error:" in chunk and any(x in chunk.lower() for x in ["429", "quota", "limit", "503", "exhausted"]):
                             error_detected = True
                             break
-                        
                         if chunk.startswith("__TOOL_CALL__:"):
                             try:
                                 parts = chunk.split(":", 2)
@@ -1200,14 +1099,11 @@ async def chat_stream(chat_message: ChatMessage):
                         else:
                             full_response_accumulator += chunk
                             yield chunk
-                            await asyncio.sleep(0.01)
-                    
+                        await asyncio.sleep(0.01)
                     if error_detected:
                         used_mode = "switching" # Trigger next iteration
-                        continue 
-                    
+                        continue
                     break # Success with gemini
-
             except Exception as e:
                 err_msg = str(e).lower()
                 if any(x in err_msg for x in ["429", "quota", "limit", "503", "exhausted"]):
@@ -1219,23 +1115,17 @@ async def chat_stream(chat_message: ChatMessage):
                     yield f"\n[Error with {current_mode}: {str(e)}]. Trying failsafe..."
                     used_mode = "switching"
                     continue
-        
         # Final cleanup and save
         if action_found:
             if action_found["tool"] in ["nmap_scan", "zap_scan", "ssl_scan", "sql_injection_scan", "packet_sniffer", "api_security_scan", "killchain_audit", "semgrep_sast_scan"]:
                 db_utils.update_or_create_session(user_id=user_id, session_id=session_id, status="STATUS_WAITING_FOR_REPORT")
             yield f"\n__METADATA_ACTION__:{json.dumps(action_found)}"
-            
         if not is_incognito and full_response_accumulator.strip():
             content_to_save = full_response_accumulator
             if action_found:
                 content_to_save += f"\n__METADATA_ACTION__:{json.dumps(action_found)}"
             db_utils.add_message(session_id, "assistant", content_to_save)
-
-
     return StreamingResponse(response_generator(), media_type="text/plain", headers={"X-Session-ID": session_id})
-
-
 @app.post("/clear_history")
 async def clear_history_endpoint(request: ClearHistoryRequest):
     """Wipes chat history but keeps the session/report metadata."""
@@ -1248,17 +1138,13 @@ async def delete_all_sessions_endpoint(request: DeleteAllSessionsRequest):
     """Wipes everything for a user across all sessions."""
     user_id = request.user_id
     logger.info(f"Bulk cleanup for user: {user_id}")
-    
     # 1. DB Cleanup
     session_ids = db_utils.delete_all_user_sessions(user_id)
-    
     # 2. RAG Cleanup
     for sid in session_ids:
         delete_namespace(f"report-{sid}")
         clear_uploaded_files(sid)
-        
     return JSONResponse(content={'success': True})
-
 
 # --- NEW ENDPOINTS FOR SESSION MANAGEMENT ---
 
@@ -1269,14 +1155,12 @@ async def delete_session_endpoint(request: DeleteSessionRequest):
     """
     session_id = request.session_id
     logger.info(f"Deleting session: {session_id}")
-    
     # 1. Clear Pinecone
     delete_namespace(session_id)
     # 2. Clear Files
     clear_uploaded_files(session_id)
     # 3. Clear DB
     db_utils.delete_session(session_id)
-    
     return JSONResponse(content={'success': True, 'message': 'Session deleted successfully'})
 
 @app.post("/rename_session")
@@ -1309,7 +1193,6 @@ async def clear_chat(request: Request, request_body: ClearChatRequest):
     """
     return await delete_session_endpoint(DeleteSessionRequest(session_id=request_body.session_id))
 
-
 @app.get("/get_history")
 async def get_history(
     user_id: str = Query(..., description="Unique user identifier"),
@@ -1319,17 +1202,13 @@ async def get_history(
     Retrieves chat history and session metadata to restore client state.
     """
     logger.info(f"Fetching history for Session: {session_id}, User: {user_id}")
-    
     # 1. Verify Session by ID
     session_data = db_utils.get_session_by_id(session_id)
-    
     if not session_data:
         # If mismatch/not found, force fresh start
         return JSONResponse(content={'success': True, 'chat_history': [], 'session_metadata': None})
-
     # 2. Get Messages
     history = db_utils.get_chat_history(session_id, limit=100)
-    
     # 3. Get Metadata (to restore UI state)
     metadata = {
         'report_type': session_data.get('report_type'),
@@ -1337,13 +1216,11 @@ async def get_history(
         'title': session_data.get('title'),
         'is_pinned': session_data.get('is_pinned')
     }
-
     return JSONResponse(content={
-        'success': True, 
-        'chat_history': history, 
+        'success': True,
+        'chat_history': history,
         'session_metadata': metadata
     })
-    
 
 @app.get("/get_user_sessions")
 async def get_user_sessions(user_id: str = Query(..., description="Unique user identifier")):

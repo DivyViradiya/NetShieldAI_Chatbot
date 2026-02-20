@@ -160,7 +160,7 @@ def _chunk_nmap_report(parsed_data: Dict[str, Any]) -> List[Dict[str, Any]]:
     scan_date = metadata.get('scan_date', 'Unknown Date')
     
     # --- 2. Determine Scan Type ---
-    scan_args = metadata.get('scan_arguments', '')
+    scan_args = metadata.get('scan_arguments') or ''
     args_lower = scan_args.lower()
     
     if "-a" in args_lower:
@@ -354,8 +354,8 @@ def _chunk_zap_report(parsed_data: Dict[str, Any]) -> List[Dict[str, Any]]:
     
     for i, finding in enumerate(findings):
         # Extract fields
-        name = finding.get('name', 'Unknown Vulnerability')
-        risk = finding.get('risk_level', 'Info')
+        name = finding.get('name') or 'Unknown Vulnerability'
+        risk = finding.get('risk_level') or 'Info'
         url = finding.get('url', 'N/A')
         description = finding.get('description', '')
         solution = finding.get('solution', '')
@@ -434,6 +434,53 @@ def _chunk_zap_report(parsed_data: Dict[str, Any]) -> List[Dict[str, Any]]:
                 "text": critical_text,
                 "metadata": {"type": "critical_flag", "priority": "urgent"},
                 "id_suffix": f"vuln_{i}_critical_{safe_name}"
+            })
+
+    return chunks
+
+def _chunk_api_report(parsed_data: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """
+    Chunks API Scanner report data into granular units. 
+    Similar to ZAP as they share a reporting engine structure.
+    """
+    chunks = []
+    meta = parsed_data.get("scan_metadata", {})
+    summary = parsed_data.get("alert_summary", {})
+    
+    overview_text = (
+        f"API Security Scan Report. Tool: {meta.get('tool', 'API Scanner')}. "
+        f"Risk Breakdown: High={summary.get('High', 0)}, "
+        f"Medium={summary.get('Medium', 0)}, "
+        f"Low={summary.get('Low', 0)}, "
+        f"Info={summary.get('Info', 0)}. "
+        f"Total Alerts: {summary.get('Total', 0)}."
+    )
+    chunks.append({"text": overview_text, "id_suffix": "api_overview"})
+
+    findings = parsed_data.get("findings", [])
+    for i, finding in enumerate(findings):
+        name = finding.get('name', 'Unknown')
+        risk = finding.get('risk_level', 'Info')
+        url = finding.get('url', 'N/A')
+        
+        # Identity Chunk
+        chunks.append({
+            "text": f"API Vulnerability: '{name}'. Risk: {risk}. Affected Endpoint: {url}.",
+            "id_suffix": f"api_vuln_{i}_id"
+        })
+        
+        # Detail Chunk
+        if finding.get('description'):
+            chunks.append({
+                "text": f"Description of {name}: {finding.get('description')}",
+                "id_suffix": f"api_vuln_{i}_desc"
+            })
+            
+        # Solution Chunk
+        if finding.get('solution'):
+            chunks.append({
+                "text": f"Remediation for {name}: {finding.get('solution')}",
+                "id_suffix": f"api_vuln_{i}_sol"
             })
 
     return chunks
@@ -580,6 +627,50 @@ def _chunk_sslscan_report(parsed_data: Dict[str, Any]) -> List[Dict[str, Any]]:
 
     return chunks
 
+def _chunk_semgrep_report(parsed_data: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """
+    Chunks Semgrep SAST report data into granular units.
+    """
+    chunks = []
+    meta = parsed_data.get("scan_metadata", {})
+    summary = parsed_data.get("summary_counts", {})
+    
+    overview_text = (
+        f"Semgrep SAST Security Report. Tool: {meta.get('tool', 'Semgrep')}. "
+        f"Summary: Total={summary.get('Total', 0)}, Errors={summary.get('Error', 0)}, "
+        f"Warnings={summary.get('Warning', 0)}."
+    )
+    chunks.append({"text": overview_text, "id_suffix": "semgrep_overview"})
+
+    findings = parsed_data.get("findings", [])
+    for i, finding in enumerate(findings):
+        rule = finding.get('rule', 'Unknown Rule')
+        severity = finding.get('severity', 'INFO')
+        file_path = finding.get('file', 'Unknown')
+        line = finding.get('line', 'N/A')
+        
+        # Identity Chunk
+        chunks.append({
+            "text": f"SAST Finding: Rule {rule} triggered in {file_path} at line {line}. Severity: {severity}.",
+            "id_suffix": f"semgrep_finding_{i}_id"
+        })
+        
+        # Detail Chunk
+        if finding.get('description'):
+            chunks.append({
+                "text": f"Description for {rule}: {finding.get('description')}",
+                "id_suffix": f"semgrep_finding_{i}_desc"
+            })
+            
+        # Code/Fix Chunk
+        if finding.get('suggested_fix'):
+            chunks.append({
+                "text": f"Suggested Fix for {rule} in {file_path}: {finding.get('suggested_fix')}",
+                "id_suffix": f"semgrep_finding_{i}_fix"
+            })
+
+    return chunks
+
 def _chunk_sql_report(parsed_data: Dict[str, Any]) -> List[Dict[str, Any]]:
     """
     Extracts high-granularity text chunks from parsed SQL Injection data.
@@ -594,9 +685,9 @@ def _chunk_sql_report(parsed_data: Dict[str, Any]) -> List[Dict[str, Any]]:
     fingerprint = parsed_data.get("database_fingerprint", {})
     vulns = parsed_data.get("vulnerabilities", [])
 
-    target = meta.get("target_url", "Unknown Target")
-    scan_date = meta.get("scan_date", "Unknown Date")
-    db_status = meta.get("database_status", "Unknown")
+    target = meta.get("target_url") or "Unknown Target"
+    scan_date = meta.get("scan_date") or "Unknown Date"
+    db_status = meta.get("database_status") or "Unknown"
 
     # 1. [METADATA] Scan Identity & Target
     # Matches: "What URL was scanned?", "When was the SQL audit done?"
@@ -623,10 +714,10 @@ def _chunk_sql_report(parsed_data: Dict[str, Any]) -> List[Dict[str, Any]]:
 
     # 3. [FINGERPRINT] Database Technology & User Context
     # Matches: "What database version is running?", "Did the scan get root access?"
-    dbms = fingerprint.get("detected_dbms", "Unknown")
-    version = fingerprint.get("version", "Unknown")
-    user = fingerprint.get("current_user", "Unknown")
-    current_db = fingerprint.get("current_database", "Unknown")
+    dbms = fingerprint.get("detected_dbms") or "Unknown"
+    version = fingerprint.get("version") or "Unknown"
+    user = fingerprint.get("current_user") or "Unknown"
+    current_db = fingerprint.get("current_database") or "Unknown"
     
     # High-value context for RAG
     is_privileged = any(role in user.lower() for role in ["root", "admin", "dba", "sa"])
@@ -858,6 +949,18 @@ def load_report_chunks_and_embeddings(parsed_report_data: Dict[str, Any], report
     embedding_model = load_embedding_model() # Ensure model is loaded
     pinecone_index = initialize_pinecone_index() # Ensure index is initialized
 
+    # --- NEW: Pre-upload Lifecycle Cleanup ---
+    report_namespace = f"report-{session_id}"
+    try:
+        # Check if namespace has vectors and wipe them to prevent context pollution
+        # from old/previous reports in the same session.
+        stats = pinecone_index.describe_index_stats()
+        if report_namespace in stats.get('namespaces', {}):
+            logger.info(f"Wiping existing vectors in namespace: {report_namespace}")
+            pinecone_index.delete(delete_all=True, namespace=report_namespace)
+    except Exception as e:
+        logger.warning(f"Failed to perform pre-upload cleanup for {report_namespace}: {e}")
+
     if report_type.lower() == "nmap":
         raw_chunks_with_metadata = _chunk_nmap_report(parsed_report_data)
     elif report_type.lower() == "zap":
@@ -870,6 +973,20 @@ def load_report_chunks_and_embeddings(parsed_report_data: Dict[str, Any], report
         raw_chunks_with_metadata = _chunk_sql_report(parsed_report_data)
     elif report_type.lower() == "killchain":
         raw_chunks_with_metadata = _chunk_killchain_report(parsed_report_data)
+    elif report_type.lower() == "api_scanner":
+        raw_chunks_with_metadata = _chunk_api_report(parsed_report_data)
+    elif report_type.lower() == "semgrep":
+        raw_chunks_with_metadata = _chunk_semgrep_report(parsed_report_data)
+    elif report_type.lower() == "generic_security_report":
+        # First, we need to transform the raw text into the structure expected by _chunk_generic_report
+        # or just create a simple chunk list here.
+        # Actually, _chunk_generic_report expects a structure from a generic parser.
+        # Let's simplify and just create chunks from raw text for this type.
+        raw_text = parsed_report_data.get("raw_text", "")
+        # Simple split into ~500 word chunks
+        words = raw_text.split()
+        chunks_text = [" ".join(words[i:i+500]) for i in range(0, len(words), 500)]
+        raw_chunks_with_metadata = [{"text": c, "id_suffix": f"gen_sec_{i}"} for i, c in enumerate(chunks_text)]
     
     else:
         logger.warning(f"Unknown report type '{report_type}'. Cannot chunk report.")

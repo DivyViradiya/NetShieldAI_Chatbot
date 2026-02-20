@@ -244,6 +244,14 @@ def add_message(session_id: str, role: str, content: str):
     conn.commit()
     conn.close()
 
+def add_system_notification(session_id: str, message: str, type: str = "SCAN_COMPLETE"):
+    """
+    Standardized helper to inject system-level notifications into chat history.
+    Common types: SCAN_COMPLETE, DATA_RECONCILED, SYSTEM_ERROR.
+    """
+    formatted_msg = f"SYSTEM_NOTIFICATION: {type}. {message}"
+    add_message(session_id, "system", formatted_msg)
+
 def get_chat_history(session_id: str, limit: int = 50) -> List[Dict]:
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row

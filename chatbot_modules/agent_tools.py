@@ -29,7 +29,19 @@ SECURITY_TOOLS = [
                     "type": "object",
                     "properties": {
                         "target_url": {"type": "string", "description": "The full website URL to scan (e.g., 'http://testphp.vulnweb.com')."},
-                        "scan_type": {"type": "string", "enum": ["Quick Scan", "Full Scan"], "default": "Quick Scan"}
+                        "scan_mode": {"type": "string", "enum": ["Quick Scan", "Full Scan"], "default": "Quick Scan"},
+                        "use_ajax": {"type": "boolean", "description": "Set to true to use AJAX Spider for modern SPAs/dynamic sites.", "default": False},
+                        "auth_config": {
+                            "type": "object",
+                            "description": "Optional configuration for Form-Based Authentication.",
+                            "properties": {
+                                "login_url": {"type": "string"},
+                                "username_field": {"type": "string"},
+                                "password_field": {"type": "string"},
+                                "username": {"type": "string"},
+                                "password": {"type": "string"}
+                            }
+                        }
                     },
                     "required": ["target_url"]
                 }
@@ -77,7 +89,8 @@ SECURITY_TOOLS = [
                     "type": "object",
                     "properties": {
                         "target_url": {"type": "string", "description": "The base API URL."},
-                        "definition_url": {"type": "string", "description": "The URL to the Swagger/OpenAPI spec JSON or YAML file."}
+                        "definition_url": {"type": "string", "description": "The URL to the Swagger/OpenAPI spec JSON or YAML file."},
+                        "auth_token": {"type": "string", "description": "Optional Bearer token or API key for authentication."}
                     },
                     "required": ["target_url", "definition_url"]
                 }
@@ -89,7 +102,8 @@ SECURITY_TOOLS = [
                     "type": "object",
                     "properties": {
                         "target": {"type": "string", "description": "The target domain or URL for the audit."},
-                        "profile": {"type": "string", "enum": ["full_audit", "stealth", "recon_only"], "default": "full_audit"}
+                        "profile": {"type": "string", "enum": ["Recon Only", "Network Audit", "Web Audit", "Full Scan"], "default": "Full Scan"},
+                        "aggression": {"type": "string", "enum": ["Normal", "Stealth", "Attack"], "default": "Normal"}
                     },
                     "required": ["target"]
                 }
@@ -111,9 +125,10 @@ SECURITY_TOOLS = [
                 "parameters": {
                     "type": "object",
                     "properties": {
-                        "file_path": {"type": "string", "description": "The path to the generated report PDF file."}
+                         "scanner_type": {"type": "string", "enum": ["zap", "api", "nmap", "killchain"], "description": " The tool that generated the report."},
+                         "target": {"type": "string", "description": "The target URL or IP that was scanned."}
                     },
-                    "required": ["file_path"]
+                    "required": ["scanner_type"]
                 }
             }
         ]

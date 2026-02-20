@@ -32,7 +32,7 @@ def _format_nmap_summary_prompt(parsed_data: Dict[str, Any]) -> str:
     ports = parsed_data.get("open_ports", [])
     
     target_ip = metadata.get('target_ip', 'N/A')
-    scan_args = metadata.get('scan_arguments', '')
+    scan_args = metadata.get('scan_arguments') or ''
     scan_date = metadata.get('scan_date', 'N/A')
     security_posture = metadata.get('security_posture', 'Unknown')
     
@@ -607,8 +607,96 @@ def _format_killchain_summary_prompt(parsed_data: Dict[str, Any]) -> str:
 
     return prompt
 
+def _format_api_scan_summary_prompt(parsed_data: Dict[str, Any]) -> str:
+    """
+    Constructs a detailed prompt for an LLM to analyze API Scanner results.
+    Similar to ZAP but focused on API endpoints.
+    """
+    prompt = (
+        "You are **NetShieldAI's Senior API Security Consultant**.\n"
+        "Your goal is to analyze the provided API Security Scan results and generate a professional security briefing.\n\n"
+        "### REQUIRED RESPONSE STRUCTURE:\n"
+        "1. **Executive Summary Table**: Columns [Scan Target, High Risks, Medium Risks, Low/Info Risks, Total Findings].\n"
+        "2. **API Endpoint Vulnerability Analysis**: Detailed breakdown of High & Medium risks.\n"
+        "3. **Prioritized Remediation Checklist (Table)**: Rank actions by criticality.\n"
+        "4. **API Security Best Practices**: General advice for securing REST/SOAP endpoints.\n\n"
+        "--- START API SCAN RAW DATA ---\n"
+    )
+    
+    meta = parsed_data.get("scan_metadata", {})
+    summary = parsed_data.get("alert_summary", {})
+    findings = parsed_data.get("findings", [])
 
-async def summarize_report_with_llm( # Added 'async' keyword here
+    prompt += f"Tool: {meta.get('tool', 'API Scanner')}\n"
+    prompt += f"Summary: High={summary.get('High', 0)}, Medium={summary.get('Medium', 0)}, Low={summary.get('Low', 0)}, Info={summary.get('Info', 0)}\n\n"
+
+    prompt += "## DETAILED FINDINGS\n"
+    for i, f in enumerate(findings[:15], 1): # Limit to 15 findings
+        prompt += f"--- FINDING #{i} ---\n"
+        prompt += f"Name: {f.get('name')}\n"
+        prompt += f"Risk: {f.get('risk_level')}\n"
+        prompt += f"Endpoint: {f.get('url')}\n"
+        prompt += f"Description: {f.get('description')}\n"
+        prompt += f"Remediation: {f.get('solution')}\n\n"
+
+    prompt += "--- END API SCAN RAW DATA ---\n"
+    return prompt
+
+def _format_semgrep_summary_prompt(parsed_data: Dict[str, Any]) -> str:
+    """
+    Constructs a prompt for analyzing Semgrep SAST results.
+    """
+    prompt = (
+        "You are **NetShieldAI's Senior Secure Code Reviewer**.\n"
+        "Your task is to analyze the following Static Application Security Testing (SAST) findings from Semgrep.\n\n"
+        "### REQUIRED RESPONSE STRUCTURE:\n"
+        "1. **Code Security Snapshot**: Summary of Total Findings, Errors, and Warnings.\n"
+        "2. **Critical Code Flaws (Table)**: Columns [Rule, File:Line, Severity, Impact].\n"
+        "3. **Technical Deep Dive**: Explain the top 3-5 most critical issues found in the code.\n"
+        "4. **Actionable Fixes**: Provide code-level remediation advice for the findings.\n\n"
+        "--- START SEMGREP SAST DATA ---\n"
+    )
+    
+    meta = parsed_data.get("scan_metadata", {})
+    summary = parsed_data.get("summary_counts", {})
+    findings = parsed_data.get("findings", [])
+
+    prompt += f"Tool: {meta.get('tool')}\n"
+    prompt += f"Summary: Total={summary.get('Total')}, Errors={summary.get('Error')}, Warnings={summary.get('Warning')}\n\n"
+
+    prompt += "## SAST FINDINGS (Sample)\n"
+    for i, f in enumerate(findings[:15], 1):
+        prompt += f"--- FINDING #{i} ---\n"
+        prompt += f"Rule: {f.get('rule')}\n"
+        prompt += f"Severity: {f.get('severity')}\n"
+        prompt += f"Location: {f.get('file')}:{f.get('line')}\n"
+        prompt += f"Description: {f.get('description')}\n"
+        if f.get('suggested_fix'):
+            prompt += f"Suggested Fix: {f.get('suggested_fix')}\n"
+        prompt += "\n"
+
+    prompt += "--- END SEMGREP SAST DATA ---\n"
+    return prompt
+
+def _format_generic_security_summary_prompt(parsed_data: Dict[str, Any]) -> str:
+    """
+    Constructs a prompt for summarizing unidentified security reports.
+    """
+    prompt = (
+        "You are **NetShieldAI's Senior Security Analyst**.\n"
+        "The following is an unidentified security report or document. Your task is to extract "
+        "the most important security findings, risks, and remediation advice.\n\n"
+        "### REQUIRED RESPONSE STRUCTURE:\n"
+        "1. **Document Overview**: Brief summary of what this document appears to be.\n"
+        "2. **Key Security Findings**: A bulleted list of the most critical issues identified.\n"
+        "3. **Recommended Next Steps**: Actionable advice based on the content.\n\n"
+        "--- START DOCUMENT CONTENT ---\n"
+    )
+    prompt += parsed_data.get("raw_text", "No text provided.")[:4000] # Truncate to avoid token limits
+    prompt += "\n--- END DOCUMENT CONTENT ---\n"
+    return prompt
+
+async def summarize_report_with_llm(
     llm_instance: Any, 
     generate_response_func: Callable[[Any, str, int], str], 
     parsed_data: Dict[str, Any], 
@@ -641,9 +729,14 @@ async def summarize_report_with_llm( # Added 'async' keyword here
         prompt = _format_sql_summary_prompt(parsed_data)
     elif report_type.lower() == "killchain":
         prompt = _format_killchain_summary_prompt(parsed_data)
+    elif report_type.lower() == "api_scanner":
+        prompt = _format_api_scan_summary_prompt(parsed_data)
+    elif report_type.lower() == "semgrep":
+        prompt = _format_semgrep_summary_prompt(parsed_data)
+    elif report_type.lower() == "generic_security_report":
+        prompt = _format_generic_security_summary_prompt(parsed_data)
     else:
         logger.warning(f"Unsupported report type: {report_type}")
-
 
     logger.info(f"Generating summary for {report_type} report...")
 
@@ -660,11 +753,9 @@ async def summarize_report_with_llm( # Added 'async' keyword here
         logger.error(f"Error generating LLM response for {report_type} summary: {e}")
         return f"Error generating summary for {report_type} report. Please try again."
 
-
-
-async def summarize_chat_history_segment( # Added 'async' keyword here
+async def summarize_chat_history_segment(
     llm_instance: Any, 
-    generate_response_func: Callable[[Any, str, int], str], # New argument: the specific generate_response function
+    generate_response_func: Callable[[Any, str, int], str], 
     history_segment: List[Dict[str, str]], 
     max_tokens: int = config.DEFAULT_SUMMARIZE_MAX_TOKENS
 ) -> str:

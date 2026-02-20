@@ -63,6 +63,11 @@ CHAT_HISTORY_SUMMARIZE_THRESHOLD = 8
 # Previous value (10,000,000) caused the API to reject the request.
 DEFAULT_SUMMARIZE_MAX_TOKENS = 16000 
 
+SUPPORTED_REPORT_TYPES = [
+    "nmap", "zap", "sslscan", "pcap", "sql", "killchain", 
+    "api_scanner", "semgrep", "generic_security_report"
+]
+
 # --- Heuristic Keywords for Report-Specific Questions ---
 REPORT_SPECIFIC_KEYWORDS = [
     # General Report/Scan Keywords
@@ -75,6 +80,7 @@ REPORT_SPECIFIC_KEYWORDS = [
 
     # Tool-Specific Identifiers
     "nikto", "sslscan", "mobsf", "zap", "nmap", "mobsf_android", "mobsf_ios",
+    "sqlmap", "semgrep", "tshark", "packet sniffer", "killchain", "api scanner",
 
     # Nikto-specific
     "web server", "http server", "header", "headers", "x-frame-options", 
@@ -90,7 +96,7 @@ REPORT_SPECIFIC_KEYWORDS = [
     "aggressive scan", "syn scan", "udp scan", "service", "script", "latency",
     "port state", "host status", "firewall", "router", "hop", "vendor",
 
-    # ZAP (OWASP ZAP) specific
+    # ZAP (OWASP ZAP) & API Scanner specific
     "zap scan", "owasp zap", "active scan", "passive scan", "spider", "ajax spider",
     "api scan", "rest api", "soap api", "graphql", "authentication", "session management",
     "broken access control", "sql injection", "xss", "cross-site scripting", 
@@ -100,6 +106,26 @@ REPORT_SPECIFIC_KEYWORDS = [
     "external redirect", "directory listing", "header missing", "cookie flag",
     "alert message", "risk level", "confidence level", "plugin", "rule", "context",
     "authenticated scan", "unauthenticated scan", "scan policy", "automation",
+    "swagger", "openapi", "endpoint", "method", "v1", "v2", "api security",
+
+    # SQL Injection specific (sqlmap/manual)
+    "sqli", "database", "injection", "blind sql", "time-based", "boolean-based",
+    "dbms", "fingerprint", "database status", "privileged account", "root access",
+    "data extraction", "union based", "error based", "payload",
+
+    # PCAP / Network Traffic specific
+    "pcap", "traffic", "packet", "sniffer", "bandwidth", "throughput", "layer",
+    "protocol hierarchy", "conversation", "frame", "bytes", "external ip", "internal ip",
+    "src_ip", "dst_ip", "connection", "traffic analysis",
+
+    # Semgrep / SAST specific
+    "sast", "static analysis", "code review", "rule", "code flaw", "vulnerable code",
+    "suggested fix", "file path", "line number", "semgrep finding", "pattern match",
+
+    # Kill Chain specific
+    "reconnaissance", "weaponization", "delivery", "exploitation", "installation",
+    "command and control", "actions on objectives", "attack surface", "phase",
+    "recon", "full audit", "security posture", "exploit path", "tech stack",
 
     # MobSF specific
     "mobsf scan", "mobile app", "android", "ios", "apk", "ipa", "app security",
