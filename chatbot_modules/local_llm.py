@@ -3,6 +3,18 @@ import logging
 from huggingface_hub import hf_hub_download
 from llama_cpp import Llama
 import asyncio
+import asyncio
+
+# Visual Logging Colors
+class LogColors:
+    EXTERNAL = "\033[94m" # Blue
+    INTERNAL = "\033[92m" # Green
+    AGENT = "\033[93m"    # Yellow
+    HYBRID = "\033[95m"   # Magenta
+    ROUTER = "\033[96m"   # Cyan
+    INIT = "\033[97m"     # White
+    SUCCESS = "\033[92m"  # Green
+    RESET = "\033[0m"
 
 # Initialize module logger
 logger = logging.getLogger(__name__)
@@ -26,10 +38,10 @@ def load_model(
     model_path = os.path.join(local_dir, model_basename)
     
     if not os.path.exists(model_path):
-        logger.info(f"Model not found. Downloading {model_basename}...")
+        logger.info(f"{LogColors.INIT}[INIT] Model not found. Downloading {model_basename}...{LogColors.RESET}")
         hf_hub_download(repo_id=model_id, filename=model_basename, local_dir=local_dir, local_dir_use_symlinks=False)
     else:
-        logger.info(f"Loading local model from {model_path}")
+        logger.info(f"{LogColors.INIT}[INIT] Loading local model from {model_path}{LogColors.RESET}")
 
     # Initialize Llama
     llm = Llama(

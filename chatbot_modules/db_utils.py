@@ -48,23 +48,34 @@ def init_db():
             session_id TEXT NOT NULL,
             role TEXT NOT NULL,
             content TEXT NOT NULL,
+            attachments TEXT, -- New Column for JSON metadata
             timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY(session_id) REFERENCES user_sessions(session_id)
+        )
+    ''')
+
+    # Table: Session Graphs (Hybrid RAG Topology)
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS session_graphs (
+            session_id TEXT PRIMARY KEY,
+            graph_json TEXT NOT NULL,
+            last_updated TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             FOREIGN KEY(session_id) REFERENCES user_sessions(session_id)
         )
     ''')
 
     conn.commit()
 
-    # --- MIGRATION: Add 'status' column if it doesn't exist ---
+    # --- MIGRATION: Add 'attachments' column if it doesn't exist ---
     try:
-        cursor.execute("PRAGMA table_info(user_sessions)")
+        cursor.execute("PRAGMA table_info(chat_history)")
         columns = [column[1] for column in cursor.fetchall()]
-        if 'status' not in columns:
-            logger.info("Migrating database: Adding 'status' column to user_sessions.")
-            cursor.execute("ALTER TABLE user_sessions ADD COLUMN status TEXT DEFAULT 'ACTIVE'")
+        if 'attachments' not in columns:
+            logger.info("Migrating database: Adding 'attachments' column to chat_history.")
+            cursor.execute("ALTER TABLE chat_history ADD COLUMN attachments TEXT")
             conn.commit()
     except Exception as e:
-        logger.error(f"Migration error (status column): {e}")
+        logger.error(f"Migration error (attachments column): {e}")
 
     conn.close()
 
@@ -171,6 +182,34 @@ def update_or_create_session(user_id: str, session_id: str, report_type: str = N
     conn.commit()
     conn.close()
 
+# --- Graph Management (Hybrid RAG) ---
+
+def save_session_graph(session_id: str, graph_json: str):
+    """Saves serialized NetworkX graph data to the database."""
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    # Upsert logic (INSERT OR REPLACE)
+    cursor.execute('''
+        INSERT INTO session_graphs (session_id, graph_json, last_updated) 
+        VALUES (?, ?, CURRENT_TIMESTAMP)
+        ON CONFLICT(session_id) DO UPDATE SET 
+            graph_json=excluded.graph_json,
+            last_updated=CURRENT_TIMESTAMP
+    ''', (session_id, graph_json))
+    conn.commit()
+    conn.close()
+
+def get_session_graph(session_id: str) -> Optional[str]:
+    """Retrieves serialized NetworkX graph data from the database."""
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    cursor.execute("SELECT graph_json FROM session_graphs WHERE session_id = ?", (session_id,))
+    row = cursor.fetchone()
+    conn.close()
+    if row:
+        return row[0]
+    return None
+
 # --- New Features: Rename, Pin, Delete ---
 
 def rename_session(session_id: str, new_title: str):
@@ -197,6 +236,8 @@ def delete_session(session_id: str):
     cursor = conn.cursor()
     # Delete history first (Foreign Key logic)
     cursor.execute("DELETE FROM chat_history WHERE session_id = ?", (session_id,))
+    # Delete Graph
+    cursor.execute("DELETE FROM session_graphs WHERE session_id = ?", (session_id,))
     # Delete session
     cursor.execute("DELETE FROM user_sessions WHERE session_id = ?", (session_id,))
     conn.commit()
@@ -221,11 +262,12 @@ def delete_all_user_sessions(user_id: str):
     session_ids = [s[0] for s in sessions]
     
     if session_ids:
-        # 2. Delete all chat history for these sessions
         placeholders = ','.join(['?'] * len(session_ids))
+        # 2. Delete all chat history for these sessions
         cursor.execute(f"DELETE FROM chat_history WHERE session_id IN ({placeholders})", session_ids)
-        
-        # 3. Delete the sessions themselves
+        # 3. Delete session graphs
+        cursor.execute(f"DELETE FROM session_graphs WHERE session_id IN ({placeholders})", session_ids)
+        # 4. Delete the sessions themselves
         cursor.execute("DELETE FROM user_sessions WHERE user_id = ?", (user_id,))
         
     conn.commit()
@@ -234,13 +276,13 @@ def delete_all_user_sessions(user_id: str):
 
 # --- Message Management ---
 
-def add_message(session_id: str, role: str, content: str):
+def add_message(session_id: str, role: str, content: str, attachments: str = None):
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
     cursor.execute('''
-        INSERT INTO chat_history (session_id, role, content)
-        VALUES (?, ?, ?)
-    ''', (session_id, role, content))
+        INSERT INTO chat_history (session_id, role, content, attachments)
+        VALUES (?, ?, ?, ?)
+    ''', (session_id, role, content, attachments))
     conn.commit()
     conn.close()
 
@@ -257,8 +299,8 @@ def get_chat_history(session_id: str, limit: int = 50) -> List[Dict]:
     conn.row_factory = sqlite3.Row
     cursor = conn.cursor()
     cursor.execute('''
-        SELECT role, content FROM (
-            SELECT id, role, content FROM chat_history 
+        SELECT role, content, attachments FROM (
+            SELECT id, role, content, attachments FROM chat_history 
             WHERE session_id = ? 
             ORDER BY id DESC
             LIMIT ?
@@ -279,6 +321,7 @@ def clear_user_data(user_id: str):
     
     for (sid,) in sessions:
         cursor.execute("DELETE FROM chat_history WHERE session_id = ?", (sid,))
+        cursor.execute("DELETE FROM session_graphs WHERE session_id = ?", (sid,))
         
     cursor.execute("DELETE FROM user_sessions WHERE user_id = ?", (user_id,))
     conn.commit()

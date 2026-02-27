@@ -179,7 +179,8 @@ def parse_api_scan_report(raw_text: str) -> Dict[str, Any]:
         "scan_metadata": {
             "tool": "API Scanner",
             "report_id": str(uuid.uuid4()),
-            "generated_at": datetime.now().isoformat()
+            "generated_at": datetime.now().isoformat(),
+            "target_url": findings_list[0]['url'] if findings_list else "Unknown_URL"
         },
         "alert_summary": final_stats,
         "findings": findings_list

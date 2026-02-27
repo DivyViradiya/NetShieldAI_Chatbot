@@ -10,6 +10,17 @@ import sys
 import re
 import datetime
 
+# Visual Logging Colors
+class LogColors:
+    EXTERNAL = "\033[94m" # Blue
+    INTERNAL = "\033[92m" # Green
+    AGENT = "\033[93m"    # Yellow
+    HYBRID = "\033[95m"   # Magenta
+    ROUTER = "\033[96m"   # Cyan
+    INIT = "\033[97m"     # White
+    SUCCESS = "\033[92m"  # Green
+    RESET = "\033[0m"
+
 # Initialize module logger
 logger = logging.getLogger(__name__)
 
@@ -76,7 +87,7 @@ def initialize_pinecone_index() -> Any: # Returns a pinecone.Index object
             # Check if index exists, if not, create it
             existing_indexes = [index_info.name for index_info in pc.list_indexes()]
             if PINECONE_INDEX_NAME not in existing_indexes:
-                logger.info(f"Creating Pinecone index '{PINECONE_INDEX_NAME}'...")
+                logger.info(f"{LogColors.INIT}Creating Pinecone index '{PINECONE_INDEX_NAME}'...{LogColors.RESET}")
                 
                 # Determine spec based on your setup (Serverless vs PodSpec)
                 # This should match how you created your index in S2_Embedding_Generation.ipynb
@@ -93,7 +104,7 @@ def initialize_pinecone_index() -> Any: # Returns a pinecone.Index object
                 )
             
             _pinecone_index = pc.Index(PINECONE_INDEX_NAME)
-            logger.info(f"Pinecone index '{PINECONE_INDEX_NAME}' initialized.")
+            logger.info(f"{LogColors.SUCCESS}Pinecone index '{PINECONE_INDEX_NAME}' initialized.{LogColors.RESET}")
         except Exception as e:
             logger.error(f"Error initializing Pinecone index: {e}")
             raise
@@ -135,8 +146,10 @@ def retrieve_rag_context(query: str, top_k: int = DEFAULT_RAG_TOP_K, namespace: 
                 context_parts.append(f"Context: {metadata['text']}")
 
         if context_parts:
+            logger.info(f"{LogColors.EXTERNAL}[EXTERNAL RAG] Retrieved {len(context_parts)} relevant knowledge base chunks for query.{LogColors.RESET}")
             return "\n\nRelevant Information from Knowledge Base:\n" + "\n---\n".join(context_parts)
         else:
+            logger.info(f"{LogColors.EXTERNAL}[EXTERNAL RAG] No relevant context found.{LogColors.RESET}")
             return "" # No relevant context found
 
     except Exception as e:
@@ -349,9 +362,7 @@ def _chunk_zap_report(parsed_data: Dict[str, Any]) -> List[Dict[str, Any]]:
         "id_suffix": "scan_overview"
     })
 
-    # --- 2. Iterate Through Findings ---
     findings = parsed_data.get("findings", [])
-    
     for i, finding in enumerate(findings):
         # Extract fields
         name = finding.get('name') or 'Unknown Vulnerability'
@@ -364,77 +375,23 @@ def _chunk_zap_report(parsed_data: Dict[str, Any]) -> List[Dict[str, Any]]:
         # Helper: Clean newlines for text blocks to improve vector embedding quality
         def clean_text(t): return " ".join(t.split()) if t else "N/A"
         
-        # Helper: Create safe ID
-        safe_name = "".join(c if c.isalnum() else "_" for c in name)[:40]
-
-        # --- Chunk A: Identity & Risk (The "What") ---
-        # Good for: "Did you find any High risk issues?"
-        identity_text = (
-            f"Vulnerability Detected: '{name}'. "
-            f"Risk Level: {risk}. Confidence: {finding.get('confidence', 'N/A')}. "
-            f"Automated Score: {score}."
+        # Combine all finding details into a single, dense chunk
+        chunk_text = (
+            f"Vulnerability Finding: '{name}' (Risk Level: {risk}). "
+            f"Affected Asset: {url}. "
+            f"Automated Score: {score}. "
+            f"Description: {clean_text(description)} "
+            f"Remediation/Solution: {clean_text(solution)}"
         )
-        chunks.append({
-            "text": identity_text,
-            "metadata": {"type": "vuln_identity", "risk": risk, "name": name},
-            "id_suffix": f"vuln_{i}_identity_{safe_name}"
-        })
-
-        # --- Chunk B: Affected Asset (The "Where") ---
-        # Good for: "What is wrong with artists.php?"
-        if url and url != "N/A":
-            asset_text = (
-                f"Asset Exposure: The URL '{url}' contains the vulnerability '{name}' "
-                f"({risk} Risk). This endpoint requires validation."
-            )
-            chunks.append({
-                "text": asset_text,
-                "metadata": {"type": "vuln_asset", "risk": risk, "url": url},
-                "id_suffix": f"vuln_{i}_asset_{safe_name}"
-            })
-
-        # --- Chunk C: Concept Description (The "Why") ---
-        # Good for: "Explain SQL Injection to me."
-        if description:
-            desc_text = f"Explanation of '{name}': {clean_text(description)}"
-            chunks.append({
-                "text": desc_text,
-                "metadata": {"type": "vuln_description", "name": name},
-                "id_suffix": f"vuln_{i}_desc_{safe_name}"
-            })
-
-        # --- Chunk D: Granular Solutions (The "How") ---
-        # Good for: "How do I fix X?" or "Give me a checklist."
-        if solution:
-            # 1. Provide the full solution context first
-            chunks.append({
-                "text": f"Remediation Guide for '{name}': {clean_text(solution)}",
-                "metadata": {"type": "vuln_solution_full", "name": name},
-                "id_suffix": f"vuln_{i}_sol_full_{safe_name}"
-            })
-            
-            # 2. Split into atomic actionable tips (splitting by newline)
-            # This allows the vector search to find specific coding advice easily.
-            steps = [s.strip() for s in solution.split('\n') if len(s.strip()) > 15]
-            for j, step in enumerate(steps):
-                chunks.append({
-                    "text": f"Actionable Fix for '{name}' (Step {j+1}): {step}",
-                    "metadata": {"type": "vuln_solution_step", "name": name},
-                    "id_suffix": f"vuln_{i}_sol_step_{j}_{safe_name}"
-                })
-
-        # --- Chunk E: Critical Alert Flag ---
-        # Good for: Priority filtering and immediate attention queries.
+        
         if risk.upper() == "HIGH":
-            critical_text = (
-                f"CRITICAL ALERT: '{name}' is a HIGH risk vulnerability affecting '{url}'. "
-                "Immediate remediation is required to prevent compromise."
-            )
-            chunks.append({
-                "text": critical_text,
-                "metadata": {"type": "critical_flag", "priority": "urgent"},
-                "id_suffix": f"vuln_{i}_critical_{safe_name}"
-            })
+            chunk_text = f"CRITICAL PRIORITY: {chunk_text}"
+            
+        chunks.append({
+            "text": chunk_text,
+            "metadata": {"type": "zap_finding", "risk": risk, "name": name, "url": url},
+            "id_suffix": f"zap_finding_{i}"
+        })
 
     return chunks
 
@@ -462,26 +419,21 @@ def _chunk_api_report(parsed_data: Dict[str, Any]) -> List[Dict[str, Any]]:
         name = finding.get('name', 'Unknown')
         risk = finding.get('risk_level', 'Info')
         url = finding.get('url', 'N/A')
+        description = finding.get('description', 'N/A')
+        solution = finding.get('solution', 'N/A')
         
-        # Identity Chunk
+        # Combine details into one dense chunk
+        chunk_text = (
+            f"API Vulnerability: '{name}' (Risk: {risk}). "
+            f"Affected Endpoint: {url}. "
+            f"Description: {description} "
+            f"Remediation: {solution}"
+        )
+        
         chunks.append({
-            "text": f"API Vulnerability: '{name}'. Risk: {risk}. Affected Endpoint: {url}.",
-            "id_suffix": f"api_vuln_{i}_id"
+            "text": chunk_text,
+            "id_suffix": f"api_vuln_{i}"
         })
-        
-        # Detail Chunk
-        if finding.get('description'):
-            chunks.append({
-                "text": f"Description of {name}: {finding.get('description')}",
-                "id_suffix": f"api_vuln_{i}_desc"
-            })
-            
-        # Solution Chunk
-        if finding.get('solution'):
-            chunks.append({
-                "text": f"Remediation for {name}: {finding.get('solution')}",
-                "id_suffix": f"api_vuln_{i}_sol"
-            })
 
     return chunks
 
@@ -1070,8 +1022,10 @@ def retrieve_internal_rag_context(query: str, report_namespace: str, top_k: int 
                 context_parts.append(metadata["text"])
         
         if context_parts:
+            logger.info(f"{LogColors.INTERNAL}[INTERNAL RAG] Retrieved {len(context_parts)} relevant report chunks for query.{LogColors.RESET}")
             return "\n\nRelevant Information from Current Report:\n" + "\n---\n".join(context_parts)
         else:
+            logger.info(f"{LogColors.INTERNAL}[INTERNAL RAG] No relevant context found from current report.{LogColors.RESET}")
             return "" # No relevant context found
 
     except Exception as e:

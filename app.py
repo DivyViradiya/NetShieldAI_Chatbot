@@ -13,7 +13,8 @@ import dotenv
 # --- FASTAPI & PYDANTIC IMPORTS ---
 from fastapi import FastAPI, Request, File, UploadFile, HTTPException, status, Query, Form
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse, StreamingResponse 
+from fastapi.responses import JSONResponse, StreamingResponse
+from fastapi.staticfiles import StaticFiles
 from starlette.concurrency import iterate_in_threadpool 
 from pydantic import BaseModel
 
@@ -30,6 +31,7 @@ try:
     import chatbot_modules.gemini_llm as gemini_llm_module
     
     import chatbot_modules.db_utils as db_utils
+    import chatbot_modules.graph_utils as graph_utils
 
     from chatbot_modules.nmap_parser import process_nmap_report_file
     from chatbot_modules.zap_parser import process_zap_report_file
@@ -37,6 +39,7 @@ try:
     from chatbot_modules.pcap_parser import process_pcap_report_file
     from chatbot_modules.sql_parser import process_sql_report_file
     from chatbot_modules.killchain_parser import process_killchain_report_file
+    from chatbot_modules.api_scanner_parser import process_api_scan_report_file
     
     from chatbot_modules.summarizer import summarize_report_with_llm, summarize_chat_history_segment
     from chatbot_modules.pdf_extractor import extract_text_from_pdf
@@ -56,24 +59,30 @@ except ImportError as e:
     print("Please ensure all modules are correctly configured in your Python path.")
     sys.exit(1)
 
+# Visual Logging Colors
+class LogColors:
+    EXTERNAL = "\033[94m" # Blue
+    INTERNAL = "\033[92m" # Green
+    AGENT = "\033[93m"    # Yellow
+    HYBRID = "\033[95m"   # Magenta
+    ROUTER = "\033[96m"   # Cyan
+    INIT = "\033[97m"     # White
+    SUCCESS = "\033[92m"  # Green
+    RESET = "\033[0m"
+
 # Initialize logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
-
-app = FastAPI()
-
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["http://localhost:8100", "http://127.0.0.1:8100"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
 
 # Configuration for file uploads
 UPLOAD_FOLDER = os.path.join(current_dir, 'uploads')
 os.makedirs(UPLOAD_FOLDER, exist_ok=True)
 MAX_CONTENT_LENGTH = 16 * 1024 * 1024  # 16 MB max file size
+
+app = FastAPI()
+
+# Mount Static Files for Uploads (e.g., for persisting images in chat history)
+app.mount("/chatbot_uploads", StaticFiles(directory=UPLOAD_FOLDER), name="chatbot_uploads")
 
 # Global state for LLM and RAG components (loaded once)
 _llm_instances_global: Dict[str, Any] = {} 
@@ -151,7 +160,7 @@ def _init_global_llm_and_rag():
 
     with _init_lock:
         if not _llm_instances_global: 
-            logger.info("Initializing global LLM instances...")
+            logger.info(f"{LogColors.INIT}[INIT] Initializing global LLM instances...{LogColors.RESET}")
             
             # --- Initialize Local LLM ---
             try:
@@ -162,7 +171,7 @@ def _init_global_llm_and_rag():
                 )
                 _llm_instances_global["local"] = local_model_instance
                 _llm_generate_funcs_global["local"] = local_llm_module.generate_response
-                logger.info("Local LLM initialized successfully.")
+                logger.info(f"{LogColors.SUCCESS}[SUCCESS] Local LLM initialized successfully.{LogColors.RESET}")
             except Exception as e:
                 logger.error(f"Failed to initialize Local LLM: {e}")
 
@@ -179,7 +188,7 @@ def _init_global_llm_and_rag():
                         )
                         _llm_instances_global[m_name] = gemini_model_instance
                         _llm_generate_funcs_global[m_name] = gemini_llm_module.generate_response
-                        logger.info(f"Gemini Model initialized: {m_name}")
+                        logger.info(f"{LogColors.SUCCESS}[SUCCESS] Gemini Model initialized: {m_name}{LogColors.RESET}")
                     except Exception as e:
                         logger.warning(f"Failed to initialize Gemini Model {m_name}: {e}")
             else:
@@ -190,19 +199,19 @@ def _init_global_llm_and_rag():
             
         # --- RAG Initialization ---
         if _embedding_model_instance_global is None:
-            logger.info("Initializing global embedding model...")
+            logger.info(f"{LogColors.INIT}[INIT] Initializing global embedding model...{LogColors.RESET}")
             try:
                 _embedding_model_instance_global = load_embedding_model()
-                logger.info("Global embedding model loaded.")
+                logger.info(f"{LogColors.SUCCESS}[SUCCESS] Global embedding model loaded.{LogColors.RESET}")
             except Exception as e:
                 logger.error(f"Failed to load global embedding model: {e}")
                 _embedding_model_instance_global = None
 
         if _pinecone_index_instance_global is None and _embedding_model_instance_global is not None:
-            logger.info("Initializing global Pinecone index...")
+            logger.info(f"{LogColors.INIT}[INIT] Initializing global Pinecone index...{LogColors.RESET}")
             try:
                 _pinecone_index_instance_global = initialize_pinecone_index()
-                logger.info("Global Pinecone index initialized.")
+                logger.info(f"{LogColors.SUCCESS}[SUCCESS] Global Pinecone index initialized.{LogColors.RESET}")
             except Exception as e:
                 logger.error(f"Failed to initialize global Pinecone index: {e}")
                 _pinecone_index_instance_global = None
@@ -228,12 +237,12 @@ def get_pinecone_index_instance():
 @app.on_event("startup")
 async def startup_event():
     """Initializes global resources when the FastAPI app starts."""
-    logger.info("FastAPI starting up...")
+    logger.info(f"{LogColors.INIT}[INIT] FastAPI starting up...{LogColors.RESET}")
     
     # --- PHASE 1: INIT DATABASE ---
     try:
         db_utils.init_db()
-        logger.info("SQLite Database Initialized.")
+        logger.info(f"{LogColors.SUCCESS}[SUCCESS] SQLite Database Initialized.{LogColors.RESET}")
     except Exception as e:
         logger.error(f"Failed to initialize database: {e}")
     
@@ -304,6 +313,10 @@ def detect_report_type_from_content(text: str) -> str:
     if "static analysis" in full_header_context or "semgrep" in full_header_context:
         return "semgrep"
 
+    # 8. API Scan
+    if "api security" in full_header_context or "api scan" in full_header_context or "api_scan" in full_header_context:
+        return "api"
+
     # Fallback
     logger.info(f"No specific report header matched in first 10 lines. Defaulting to generic_pdf.")
     return "generic_pdf"
@@ -342,9 +355,9 @@ def is_report_specific_question_web(question: str, report_data: Dict[str, Any]) 
                 if port.get("service") and port["service"].lower() in question_lower:
                     return True
 
-    elif "zap" in report_tool:
+    elif "zap" in report_tool or "api" in report_tool:
             question_lower = question_lower.lower().strip()
-            risk_keywords = ["risk", "vulnerability", "finding", "issue", "security", "alerts"]
+            risk_keywords = ["risk", "vulnerability", "finding", "issue", "security", "alerts", "api"]
             
             if any(keyword in question_lower for keyword in risk_keywords) or \
             any(level in question_lower for level in ["high", "medium", "low", "informational"]):
@@ -553,6 +566,29 @@ def parse_local_llm_action(text: str) -> Optional[Dict[str, Any]]:
 
     return None
 
+@app.get("/chatbot/session/{session_id}/graph")
+async def get_session_graph(session_id: str):
+    """
+    Returns the JSON representation of the NetworkX graph for the given session.
+    """
+    try:
+        graph_json = db_utils.get_session_graph(session_id)
+        if not graph_json:
+            return JSONResponse(
+                status_code=status.HTTP_404_NOT_FOUND,
+                content={"success": False, "message": "No graph context found for this session."}
+            )
+        return JSONResponse(
+            status_code=status.HTTP_200_OK,
+            content={"success": True, "graph_data": json.loads(graph_json)}
+        )
+    except Exception as e:
+        logger.error(f"Error fetching graph for session {session_id}: {e}")
+        return JSONResponse(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            content={"success": False, "message": "Failed to retrieve graph data."}
+        )
+
 @app.post("/upload_report")
 async def upload_report(
     file: Optional[UploadFile] = File(None, alias="file"),
@@ -632,6 +668,8 @@ async def upload_report(
             parsed_data = process_killchain_report_file(target_file_to_process)
         elif report_type == 'sql':
             parsed_data = process_sql_report_file(target_file_to_process)
+        elif report_type == 'api':
+            parsed_data = process_api_scan_report_file(target_file_to_process)
         else:
             # Fallback to Generic PDF
             if extracted_text and len(extracted_text.strip()) > 50:
@@ -665,8 +703,20 @@ async def upload_report(
                     title=initial_title,
                     status="ACTIVE" # Clear STATUS_WAITING_FOR_REPORT
                 )
+                
+                # --- Hybrid RAG: Build and Persist Logical Graph ---
+                if report_type != "generic_pdf":
+                    existing_graph_json = db_utils.get_session_graph(session_id)
+                    current_graph = graph_utils.deserialize_graph(existing_graph_json) if existing_graph_json else graph_utils.create_base_graph()
+                    
+                    new_graph = graph_utils.build_graph_from_report(current_graph, parsed_data, report_type)
+                    serialized_graph = graph_utils.serialize_graph(new_graph)
+                    
+                    db_utils.save_session_graph(session_id, serialized_graph)
+                    logger.info(f"Hybrid RAG: Saved topological graph for session {session_id} ({new_graph.number_of_nodes()} nodes, {new_graph.number_of_edges()} edges)")
+                
             except Exception as e:
-                logger.error(f"Failed to persist session to database: {e}")
+                logger.error(f"Failed to persist session/graph to database: {e}")
             # --- Generate Summary with Failover ---
             initial_summary = "Report parsed successfully, but summarization failed."
             requested_mode = llm_mode
@@ -833,7 +883,7 @@ async def chat(chat_message: ChatMessage):
     rag_context = ""
     # Determine if Internal RAG is needed
     if current_parsed_report and is_report_specific_question_web(user_question, current_parsed_report):
-        logger.info(f"Using Internal RAG context for session {session_id}")
+        logger.info(f"{LogColors.ROUTER}[QUERY ROUTER] Query is specific to {current_report_type}. Triggering INTERNAL RAG Context Retrieval.{LogColors.RESET}")
         embedding_model = get_embedding_model_instance()
         pinecone_index = get_pinecone_index_instance()
         if current_report_namespace and embedding_model and pinecone_index:
@@ -844,7 +894,7 @@ async def chat(chat_message: ChatMessage):
             llm_prompt_content += "No specific relevant information found in the current report for this query. "
     else:
         # External RAG
-        logger.info(f"Using External RAG context for session {session_id}")
+        logger.info(f"{LogColors.ROUTER}[QUERY ROUTER] Query is general. Searching EXTERNAL KNOWLEDGE BASE.{LogColors.RESET}")
         embedding_model = get_embedding_model_instance()
         pinecone_index = get_pinecone_index_instance()
         if embedding_model and pinecone_index:
@@ -855,6 +905,16 @@ async def chat(chat_message: ChatMessage):
                 llm_prompt_content += "No specific relevant information found in the knowledge base. "
         else:
             llm_prompt_content += "RAG components not loaded. Answering based on general knowledge.\n"
+            
+    # --- HYBRID RAG: Inject Logical Topology Graph Context ---
+    if current_parsed_report and current_report_type != "generic_pdf":
+        graph_json = db_utils.get_session_graph(session_id)
+        if graph_json:
+            session_graph = graph_utils.deserialize_graph(graph_json)
+            graph_summary = graph_utils.generate_graph_summary(session_graph)
+            if graph_summary:
+                logger.info(f"{LogColors.HYBRID}[HYBRID RAG] Injected Topological Graph Context for session {session_id}{LogColors.RESET}")
+                llm_prompt_content += f"\n--- LOGICAL TOPOLOGY GRAPH (Hybrid RAG) ---\nThe following explains the relationships between identified host machines, ports, services, URLs, and vulnerabilities for this session. Use this to trace attack vectors and lateral movement logic.\n{graph_summary}\n-------------------------------------------\n"
     concatenated_prompt = ""
     if summarized_context_str:
         concatenated_prompt += summarized_context_str
@@ -917,6 +977,10 @@ async def chat(chat_message: ChatMessage):
                     "parameters": local_action["args"],
                     "monitor_mode": "terminal"
                 }
+                logger.info(f"{LogColors.AGENT}[AGENT] Tool Triggered (Local Failover): {tool_action.get('tool')} with parameters {tool_action.get('parameters')}{LogColors.RESET}")
+        elif tool_action:
+             logger.info(f"{LogColors.AGENT}[AGENT] Tool Triggered: {tool_action.get('tool')} with parameters {tool_action.get('parameters')}{LogColors.RESET}")
+        
         # Inject failsafe notification if we switched models
         if used_mode != requested_mode:
             llm_response_text = f"[System: Model {requested_mode} unavailable. Switched to {used_mode} failsafe.]\n\n" + llm_response_text
@@ -941,19 +1005,115 @@ async def chat(chat_message: ChatMessage):
     except Exception as e:
         logger.error(f"Error generating LLM response for session {session_id}: {e}", exc_info=True)
         raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=f'An error occurred while generating response: {e}')
-# --- NEW STREAMING CHAT ENDPOINT ---
+# --- NEW MULTIMODAL HELPER ---
+async def process_attachments(files: List[UploadFile]) -> List[Dict[str, Any]]:
+    """
+    Processes uploaded files for multimodal analysis.
+    Images -> Binary + Mime + Save for persistence
+    Logs/PCAPs/IaC/Data -> Extract text and format as context parts.
+    """
+    processed = []
+    chatbot_upload_dir = os.path.join(UPLOAD_FOLDER, "chatbot")
+    os.makedirs(chatbot_upload_dir, exist_ok=True)
+    for file in files:
+        content = await file.read()
+        ext = os.path.splitext(file.filename)[1].lower()
+        mime = file.content_type
+
+        # 1. Images (True Multimodal)
+        is_image = mime.startswith('image/') or ext in ['.jpg', '.jpeg', '.png', '.gif', '.webp', '.bmp', '.tiff', '.svg', '.heic', '.heif']
+        
+        if is_image:
+            # Persistent Storage for Chat History
+            unique_filename = f"{uuid.uuid4()}{ext}"
+            file_path = os.path.join(chatbot_upload_dir, unique_filename)
+            
+            with open(file_path, "wb") as f:
+                f.write(content)
+            
+            # Ensure mime-type is correct if we fell back to extension
+            final_mime = mime if mime.startswith('image/') else f"image/{ext.replace('.', '')}"
+            processed.append({
+                "type": "image", 
+                "mime_type": final_mime, 
+                "data": content,
+                "url": f"/chatbot_uploads/chatbot/{unique_filename}",
+                "name": file.filename
+            })
+            logger.info(f"Multimodal: Attached Image {file.filename} (Mime: {final_mime}, {len(content)} bytes)")
+        
+        # 2. Network Captures (Requires parsing)
+        elif ext in ['.pcap', '.pcapng']:
+            try:
+                # Save temporarily to parse
+                tmp_path = os.path.join(UPLOAD_FOLDER, f"tmp_{uuid.uuid4()}{ext}")
+                with open(tmp_path, "wb") as f:
+                    f.write(content)
+                
+                # Use existing pcap parser
+                pcap_data = process_pcap_report_file(tmp_path)
+                os.remove(tmp_path)
+                
+                # Convert to text block
+                text_block = f"\n--- ATTACHED NETWORK CAPTURE: {file.filename} ---\n"
+                text_block += json.dumps(pcap_data, indent=2)
+                text_block += "\n-------------------------------------------\n"
+                processed.append({"type": "text", "content": text_block})
+                logger.info(f"Multimodal: Parsed PCAP {file.filename}")
+            except Exception as e:
+                logger.error(f"Failed to parse attached PCAP {file.filename}: {e}")
+
+        # 3. Code/Logs/Configs/Data (Direct Text Extraction)
+        elif ext in ['.log', '.txt', '.yaml', '.json', '.tf', '.py', '.js', '.html', '.md', '.csv', '.jsonl', '.xml']:
+            try:
+                text = content.decode('utf-8', errors='ignore')
+                text_block = f"\n--- ATTACHED FILE: {file.filename} ---\n{text}\n---------------------------\n"
+                processed.append({"type": "text", "content": text_block})
+                logger.info(f"Multimodal: Extracted text from {file.filename}")
+            except Exception as e:
+                logger.error(f"Failed to read attached file {file.filename}: {e}")
+                
+    return processed
+
+# --- UPDATED CHAT STREAM ENDPOINT ---
 @app.post("/chat_stream")
-async def chat_stream(chat_message: ChatMessage):
+async def chat_stream(
+    request: Request,
+    message: Optional[str] = Form(None),
+    session_id: Optional[str] = Form(None),
+    user_id: Optional[str] = Form(None),
+    verbosity: Optional[str] = Form("standard"),
+    is_incognito: Optional[bool] = Form(False),
+    llm_mode: Optional[str] = Form(config.DEFAULT_LLM_MODE),
+    files: List[UploadFile] = File([])
+):
     """
     Handles user chat messages via STREAMING.
+    Supports both JSON and Multipart Form Data for multimodal input.
     """
-    user_question = chat_message.message
-    session_id = chat_message.session_id
-    user_id = chat_message.user_id
-    verbosity = chat_message.verbosity
-    is_incognito = chat_message.is_incognito
-    llm_mode = chat_message.llm_mode if chat_message.llm_mode in config.SUPPORTED_LLM_MODES else config.DEFAULT_LLM_MODE
-    # --- 1. Session Retrieval & Creation ---
+    # 1. Handle JSON Failsafe (if no files are sent, client might send JSON)
+    if not message and not files:
+        try:
+            body = await request.json()
+            chat_message = ChatMessage(**body)
+            user_question = chat_message.message
+            session_id = chat_message.session_id
+            user_id = chat_message.user_id
+            verbosity = chat_message.verbosity
+            is_incognito = chat_message.is_incognito
+            llm_mode = chat_message.llm_mode
+        except Exception:
+            raise HTTPException(status_code=400, detail="Missing message or invalid JSON body")
+    else:
+        user_question = message
+        # Convert string bools from form data
+        is_incognito = str(is_incognito).lower() == 'true'
+        llm_mode = llm_mode if llm_mode in config.SUPPORTED_LLM_MODES else config.DEFAULT_LLM_MODE
+
+    if not user_id:
+        raise HTTPException(status_code=400, detail="user_id is required")
+
+    # --- 2. Session Retrieval & Creation ---
     session_data = None
     if session_id:
         session_data = db_utils.get_session_by_id(session_id)
@@ -969,31 +1129,60 @@ async def chat_stream(chat_message: ChatMessage):
         session_data = db_utils.get_session_by_id(session_id)
     else:
         session_id = session_data['session_id']
+
     if not is_incognito:
         db_utils.update_or_create_session(user_id=user_id, session_id=session_id)
-    # --- 2. Persist User Message Immediately (Skip if Incognito) ---
+
+    # --- 3. Process Attachments ---
+    multimodal_parts = await process_attachments(files)
+    
+    # Prepend text attachments to the question
+    augmented_question = user_question
+    image_attachments = []
+    
+    for part in multimodal_parts:
+        if part["type"] == "text":
+            augmented_question = part["content"] + "\n" + augmented_question
+        elif part["type"] == "image":
+            image_attachments.append({
+                "mime_type": part["mime_type"], 
+                "data": part["data"],
+                "url": part["url"],
+                "name": part["name"]
+            })
+
+    # --- 4. Persist User Message (Skip if Incognito) ---
     if not is_incognito:
-        db_utils.add_message(session_id, "user", user_question)
-    # --- 3. Build Context ---
+        # Note: We save the original question, but history will include the multimodal context for the LLM
+        # We also store the image metadata for visual persistence on refresh
+        attachment_json = json.dumps([{"url": a["url"], "name": a["name"], "type": "image"} for a in image_attachments]) if image_attachments else None
+        db_utils.add_message(session_id, "user", user_question, attachments=attachment_json)
+
+    # --- 5. Build Context ---
     current_parsed_report = session_data.get('parsed_report_data')
     current_report_type = session_data.get('report_type')
     current_report_namespace = session_data.get('pinecone_namespace')
     current_status = session_data.get('status', 'ACTIVE')
+
     # Fetch History
     chat_history_db = db_utils.get_chat_history(session_id, limit=config.CHAT_HISTORY_MAX_TURNS + 2)
     chat_history = [{"role": row['role'], "content": row['content']} for row in chat_history_db]
+
     # System Instruction
     system_instruction = ""
     if verbosity == "concise":
         system_instruction = "System: Provide a very brief, concise answer. Avoid fluff.\n"
     elif verbosity == "detailed":
         system_instruction = "System: Provide a detailed, technical deep-dive response.\n"
+
     # --- Status-Specific Context ---
     if current_status == "STATUS_WAITING_FOR_REPORT":
         system_instruction += "System: A security scan is currently running. Inform the user you will analyze it once complete.\n"
+
     # --- Active Report Injection ---
     if current_parsed_report:
         system_instruction += f"System: CURRENT ACTIVE REPORT: A {str(current_report_type).upper()} report is already loaded. Use it for your response.\n"
+
     # --- ORCHESTRATOR SYSTEM PROMPT ---
     orchestrator_prompt = (
         "System: You are the NetShieldAI Security Orchestrator. Your goal is to guide the user through security audits and analyze technical telemetry.\n"
@@ -1017,9 +1206,11 @@ async def chat_stream(chat_message: ChatMessage):
         "6. Synchronization: When you receive the trigger '[ANALYSIS_TRIGGER]', analyze the summary in 'SYSTEM_NOTIFICATION' and provide a professional breakdown.\n"
     )
     llm_prompt_content = orchestrator_prompt + system_instruction
-    rag_context = ""
+
     # RAG Logic
+    rag_context = ""
     if current_parsed_report and is_report_specific_question_web(user_question, current_parsed_report):
+        logger.info(f"{LogColors.ROUTER}[STREAM ROUTER] Query triggers INTERNAL {current_report_type.upper()} RAG.{LogColors.RESET}")
         embedding_model = get_embedding_model_instance()
         pinecone_index = get_pinecone_index_instance()
         if current_report_namespace and embedding_model and pinecone_index:
@@ -1029,50 +1220,66 @@ async def chat_stream(chat_message: ChatMessage):
             llm_prompt_content += f"The user is asking a question related to the previously provided {str(current_report_type).upper()} document/report.\n"
     else:
         # External RAG
+        logger.info(f"{LogColors.ROUTER}[STREAM ROUTER] Query is general. Searching EXTERNAL KNOWLEDGE BASE.{LogColors.RESET}")
         embedding_model = get_embedding_model_instance()
         pinecone_index = get_pinecone_index_instance()
         if embedding_model and pinecone_index:
             rag_context = retrieve_rag_context(user_question, top_k=config.DEFAULT_RAG_TOP_K, namespace="owasp-cybersecurity-kb")
             if rag_context:
                 llm_prompt_content += f"Here is some relevant information from a cybersecurity knowledge base:\n{rag_context}\n\n"
-    # Build Prompt String
-    concatenated_prompt = ""
+            
+    # --- HYBRID RAG: Inject Logical Topology Graph Context (Stream) ---
+    if current_parsed_report and current_report_type != "generic_pdf":
+        graph_json = db_utils.get_session_graph(session_id)
+        if graph_json:
+            session_graph = graph_utils.deserialize_graph(graph_json)
+            graph_summary = graph_utils.generate_graph_summary(session_graph)
+            if graph_summary:
+                logger.info(f"{LogColors.HYBRID}[HYBRID RAG] Injected Topological Graph Context for session {session_id}{LogColors.RESET}")
+                llm_prompt_content += f"\n--- LOGICAL TOPOLOGY GRAPH (Hybrid RAG) ---\nThe following explains the relationships between identified host machines, ports, services, URLs, and vulnerabilities for this session. Use this to trace attack vectors and lateral movement logic.\n{graph_summary}\n-------------------------------------------\n"
+    # Build History String
+    concatenated_history = ""
     for msg in chat_history:
         role_label = msg['role'].capitalize()
         if msg['role'] == 'system_hidden':
             role_label = 'System'
         elif msg['role'] in ['assistant', 'ai']:
             role_label = 'Assistant'
-        concatenated_prompt += f"{role_label}: {msg['content']}\n"
-    concatenated_prompt += f"User: {user_question}\n"
-    final_llm_prompt = f"{llm_prompt_content}\n{concatenated_prompt}\nAssistant:"
-    # --- 4. Stream Generator ---
+        concatenated_history += f"{role_label}: {msg['content']}\n"
+    
+    # --- 6. Generation with Failover ---
+    # We use augmented_question for the latest turn
+    final_prompt = f"{llm_prompt_content}\n{concatenated_history}User: {augmented_question}\nAssistant:"
+    
+    requested_mode = llm_mode
+    if requested_mode in config.LLM_FAILOVER_PRIORITY:
+        idx = config.LLM_FAILOVER_PRIORITY.index(requested_mode)
+        failover_sequence = config.LLM_FAILOVER_PRIORITY[idx:]
+    else:
+        failover_sequence = [requested_mode] + config.LLM_FAILOVER_PRIORITY
+
     async def response_generator():
-        nonlocal llm_mode
+        nonlocal session_id
         full_response_accumulator = ""
-        action_found = None
-        requested_mode = chat_message.llm_mode if chat_message.llm_mode in config.SUPPORTED_LLM_MODES else config.DEFAULT_LLM_MODE
-        # Determine failover sequence
-        if requested_mode in config.LLM_FAILOVER_PRIORITY:
-            idx = config.LLM_FAILOVER_PRIORITY.index(requested_mode)
-            failover_sequence = config.LLM_FAILOVER_PRIORITY[idx:]
-        else:
-            failover_sequence = [requested_mode] + config.LLM_FAILOVER_PRIORITY
+        action_found = None 
         used_mode = requested_mode
-        for current_mode in failover_sequence:
-            full_response_accumulator = "" # Reset for each attempt
-            llm_instance = _llm_instances_global.get(current_mode)
-            if not llm_instance:
+        
+        for mode in failover_sequence:
+            instance = _llm_instances_global.get(mode)
+            if not instance:
                 continue
-            if used_mode != requested_mode:
-                yield f"\n\n[System: {requested_mode} unavailable. Failing over to {current_mode}...]\n\n"
+
             try:
-                if current_mode == "local":
-                    sync_gen = local_llm_module.generate_response_stream(llm_instance, final_llm_prompt)
-                    async for chunk in iterate_in_threadpool(sync_gen):
-                        full_response_accumulator += chunk
-                        yield chunk
-                    # Check for local actions
+                if used_mode != requested_mode:
+                    yield f"[System: Model {requested_mode} unavailable. Switched to {mode} failsafe.]\n\n"
+
+                if mode == "local":
+                    gen_func = _llm_generate_funcs_global.get(mode)
+                    result = await execute_with_retry(gen_func, instance, final_prompt)
+                    text = result.get("text", "")
+                    full_response_accumulator = text
+                    yield text
+                    
                     local_action = parse_local_llm_action(full_response_accumulator)
                     if local_action:
                         action_found = {
@@ -1080,52 +1287,149 @@ async def chat_stream(chat_message: ChatMessage):
                             "parameters": local_action["args"],
                             "monitor_mode": "terminal"
                         }
-                    break # Success with local
                 else:
-                    # Gemini Models
-                    error_detected = False
-                    async for chunk in gemini_llm_module.generate_response_stream(llm_instance, final_llm_prompt):
-                        if "[System Error:" in chunk and any(x in chunk.lower() for x in ["429", "quota", "limit", "503", "exhausted"]):
-                            error_detected = True
-                            break
-                        if chunk.startswith("__TOOL_CALL__:"):
-                            try:
+                    # Gemini Multimodal Streaming
+                    async for chunk in gemini_llm_module.generate_response_stream(instance, final_prompt, attachments=image_attachments):
+                        if chunk:
+                            if chunk.startswith("__TOOL_CALL__:"):
                                 parts = chunk.split(":", 2)
                                 tool_name = parts[1]
-                                args = json.loads(parts[2])
-                                action_found = {"tool": tool_name, "parameters": args, "monitor_mode": "terminal"}
-                            except:
-                                logger.error("Failed to parse tool call")
-                        else:
-                            full_response_accumulator += chunk
-                            yield chunk
-                        await asyncio.sleep(0.01)
-                    if error_detected:
-                        used_mode = "switching" # Trigger next iteration
-                        continue
-                    break # Success with gemini
+                                tool_args = json.loads(parts[2])
+                                action_found = {"tool": tool_name, "parameters": tool_args, "monitor_mode": "terminal"}
+                                logger.info(f"{LogColors.AGENT}[AGENT] Tool Triggered in stream: {tool_name}{LogColors.RESET}")
+                            else:
+                                full_response_accumulator += chunk
+                                yield chunk
+                
+                # Success
+                used_mode = mode
+                break
             except Exception as e:
-                err_msg = str(e).lower()
-                if any(x in err_msg for x in ["429", "quota", "limit", "503", "exhausted"]):
-                    logger.warning(f"Streaming failed for {current_mode}. Failing over...")
-                    used_mode = "switching"
-                    continue
-                else:
-                    logger.error(f"Streaming error for {current_mode}: {e}")
-                    yield f"\n[Error with {current_mode}: {str(e)}]. Trying failsafe..."
-                    used_mode = "switching"
-                    continue
-        # Final cleanup and save
+                logger.error(f"Streaming failed for {mode}: {e}")
+                if mode == failover_sequence[-1]:
+                    yield f"\n[Critical Error: All models failed. {str(e)}]"
+                continue
+
+        # --- Post-Stream Persistence ---
         if action_found:
-            if action_found["tool"] in ["nmap_scan", "zap_scan", "ssl_scan", "sql_injection_scan", "packet_sniffer", "api_security_scan", "killchain_audit", "semgrep_sast_scan"]:
-                db_utils.update_or_create_session(user_id=user_id, session_id=session_id, status="STATUS_WAITING_FOR_REPORT")
-            yield f"\n__METADATA_ACTION__:{json.dumps(action_found)}"
-        if not is_incognito and full_response_accumulator.strip():
+             yield f"__METADATA_ACTION__:{json.dumps(action_found)}"
+
+        if not is_incognito and full_response_accumulator:
             content_to_save = full_response_accumulator
             if action_found:
-                content_to_save += f"\n__METADATA_ACTION__:{json.dumps(action_found)}"
+                 content_to_save += f"\n__METADATA_ACTION__:{json.dumps(action_found)}"
             db_utils.add_message(session_id, "assistant", content_to_save)
-    return StreamingResponse(response_generator(), media_type="text/plain", headers={"X-Session-ID": session_id})
+
+    headers = {"X-Session-ID": session_id}
+    return StreamingResponse(response_generator(), media_type="text/plain", headers=headers)
+
+@app.post("/chat")
+async def chat(
+    request: Request,
+    message: Optional[str] = Form(None),
+    session_id: Optional[str] = Form(None),
+    user_id: Optional[str] = Form(None),
+    verbosity: Optional[str] = Form("standard"),
+    is_incognito: Optional[bool] = Form(False),
+    llm_mode: Optional[str] = Form(config.DEFAULT_LLM_MODE),
+    files: List[UploadFile] = File([])
+):
+    """Handles user chat messages (BLOCKING MODE) with multimodal support."""
+    # 1. Handle JSON Failsafe
+    if not message and not files:
+        try:
+            body = await request.json()
+            chat_message = ChatMessage(**body)
+            user_question = chat_message.message
+            session_id = chat_message.session_id
+            user_id = chat_message.user_id
+            verbosity = chat_message.verbosity
+            is_incognito = chat_message.is_incognito
+            llm_mode = chat_message.llm_mode
+        except Exception:
+             raise HTTPException(status_code=400, detail="Missing message")
+    else:
+        user_question = message
+        is_incognito = str(is_incognito).lower() == 'true'
+        llm_mode = llm_mode if llm_mode in config.SUPPORTED_LLM_MODES else config.DEFAULT_LLM_MODE
+
+    # 2. Session Retrieval
+    session_data = None
+    if session_id:
+        session_data = db_utils.get_session_by_id(session_id)
+    if not session_data:
+        session_id = str(uuid.uuid4())
+        db_utils.update_or_create_session(user_id=user_id, session_id=session_id, report_type="General", title="General Chat")
+        session_data = db_utils.get_session_by_id(session_id)
+    else:
+        session_id = session_data['session_id']
+
+    # 3. Process Attachments
+    multimodal_parts = await process_attachments(files)
+    augmented_question = user_question
+    image_attachments = []
+    for part in multimodal_parts:
+        if part["type"] == "text":
+            augmented_question = part["content"] + "\n" + augmented_question
+        elif part["type"] == "image":
+            image_attachments.append({
+                "mime_type": part["mime_type"], 
+                "data": part["data"],
+                "url": part["url"],
+                "name": part["name"]
+            })
+
+    if not is_incognito:
+        attachment_json = json.dumps([{"url": a["url"], "name": a["name"], "type": "image"} for a in image_attachments]) if image_attachments else None
+        db_utils.add_message(session_id, "user", user_question, attachments=attachment_json)
+        db_utils.update_or_create_session(user_id=user_id, session_id=session_id)
+
+    # 4. Build Prompt
+    chat_history_db = db_utils.get_chat_history(session_id, limit=config.CHAT_HISTORY_MAX_TURNS)
+    chat_history = [{"role": row['role'], "content": row['content']} for row in chat_history_db[:-1]] # Exclude the message we just added
+    
+    prompt = f"System: NetShieldAI Orchestrator.\n"
+    for m in chat_history:
+        prompt += f"{m['role'].capitalize()}: {m['content']}\n"
+    prompt += f"User: {augmented_question}\nAssistant:"
+
+    # 5. Generation with Failover
+    used_mode = llm_mode
+    llm_result = None
+    failover_sequence = [llm_mode] + [m for m in config.SUPPORTED_LLM_MODES if m != llm_mode]
+    
+    for mode in failover_sequence:
+        instance = _llm_instances_global.get(mode)
+        gen_func = _llm_generate_funcs_global.get(mode)
+        if not instance or not gen_func: continue
+        try:
+            if mode != "local":
+                llm_result = await execute_with_retry(gen_func, instance, prompt, attachments=image_attachments)
+            else:
+                llm_result = await execute_with_retry(gen_func, instance, prompt)
+            used_mode = mode
+            break
+        except Exception: continue
+
+    if not llm_result:
+        raise HTTPException(status_code=500, detail="Generation failed")
+
+    llm_response_text = llm_result.get("text", "")
+    tool_action = llm_result.get("tool_call")
+
+    if not is_incognito:
+        content_to_save = llm_response_text
+        if tool_action:
+            content_to_save += f"\n__METADATA_ACTION__:{json.dumps(tool_action)}"
+        db_utils.add_message(session_id, "assistant", content_to_save)
+
+    return JSONResponse(content={
+        'success': True,
+        'response': llm_response_text,
+        'action': tool_action,
+        'session_id': session_id
+    })
+
 @app.post("/clear_history")
 async def clear_history_endpoint(request: ClearHistoryRequest):
     """Wipes chat history but keeps the session/report metadata."""
@@ -1233,3 +1537,4 @@ async def get_user_sessions(user_id: str = Query(..., description="Unique user i
         return JSONResponse(content={'success': False, 'sessions': []})
 
 # uvicorn app:app --host 0.0.0.0 --port 5000 --reload
+

@@ -6,6 +6,17 @@ import logging
 import asyncio
 import json
 
+# Visual Logging Colors
+class LogColors:
+    EXTERNAL = "\033[94m" # Blue
+    INTERNAL = "\033[92m" # Green
+    AGENT = "\033[93m"    # Yellow
+    HYBRID = "\033[95m"   # Magenta
+    ROUTER = "\033[96m"   # Cyan
+    INIT = "\033[97m"     # White
+    SUCCESS = "\033[92m"  # Green
+    RESET = "\033[0m"
+
 # Setup logging
 logger = logging.getLogger(__name__)
 
@@ -22,20 +33,30 @@ def load_model(api_key: str = None, model_name: str = "gemini-2.5-flash", tools:
         genai.configure(api_key=key_to_use)
         # Initialize model with tools if provided
         model = genai.GenerativeModel(model_name, tools=tools)
-        logger.info(f"Gemini model loaded: {model_name} (Tools: {True if tools else False})")
+        logger.info(f"{LogColors.SUCCESS}[SUCCESS] Gemini model loaded: {model_name} (Tools: {True if tools else False}){LogColors.RESET}")
         return model
     except Exception as e:
         logger.error(f"Failed to load Gemini model: {e}")
         raise e
 
-async def generate_response(model, prompt: str, max_tokens: int = 8192) -> dict:
+async def generate_response(model, prompt: str, max_tokens: int = 8192, attachments: list = None) -> dict:
     """
     Standard Async Generation. 
     Returns a dict: {"text": str, "tool_call": dict or None}
     """
     try:
         generation_config = genai.types.GenerationConfig(max_output_tokens=max_tokens, temperature=0.7)
-        response = await model.generate_content_async(prompt, generation_config=generation_config)
+        
+        # Build multimodal content parts
+        content = [prompt]
+        if attachments:
+            for att in attachments:
+                content.append({
+                    "mime_type": att["mime_type"],
+                    "data": att["data"]
+                })
+        
+        response = await model.generate_content_async(content, generation_config=generation_config)
         
         # Check for safety blocks
         if response.prompt_feedback and response.prompt_feedback.block_reason:
@@ -64,14 +85,24 @@ async def generate_response(model, prompt: str, max_tokens: int = 8192) -> dict:
         raise e
 
 # --- NEW STREAMING FUNCTION ---
-async def generate_response_stream(model, prompt: str, max_tokens: int = 8192):
+async def generate_response_stream(model, prompt: str, max_tokens: int = 8192, attachments: list = None):
     """
     Generates a response asynchronously and yields chunks. 
     Note: Function calls usually come in the first chunk or as a separate non-text part.
     """
     try:
         generation_config = genai.types.GenerationConfig(max_output_tokens=max_tokens, temperature=0.7)
-        response = await model.generate_content_async(prompt, generation_config=generation_config, stream=True)
+        
+        # Build multimodal content parts
+        content = [prompt]
+        if attachments:
+            for att in attachments:
+                content.append({
+                    "mime_type": att["mime_type"],
+                    "data": att["data"]
+                })
+        
+        response = await model.generate_content_async(content, generation_config=generation_config, stream=True)
         
         async for chunk in response:
             # Check for function call in the chunk
