@@ -11,11 +11,11 @@ from typing import Dict, Any, List, Optional
 import dotenv
 
 # --- FASTAPI & PYDANTIC IMPORTS ---
-from fastapi import FastAPI, Request, File, UploadFile, HTTPException, status, Query, Form
+from fastapi import FastAPI, Request, File, UploadFile, HTTPException, status, Query, Form, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
-from starlette.concurrency import iterate_in_threadpool 
+from starlette.concurrency import run_in_threadpool, iterate_in_threadpool 
 from pydantic import BaseModel
 
 dotenv.load_dotenv()
@@ -270,7 +270,7 @@ async def shutdown_event():
     logger.info("Global resources cleanup complete.")
 
 # --- IMPROVED REPORT DETECTION LOGIC ---
-def detect_report_type_from_content(text: str) -> str:
+def detect_report_type_from_content(text: str, filename: Optional[str] = None) -> str:
     """
     Identifies the report type by scanning the first few lines of the text.
     Uses multi-line keyword matching for robustness.
@@ -279,46 +279,64 @@ def detect_report_type_from_content(text: str) -> str:
         logger.warning("Detection failed: Extracted text is empty.")
         return "generic_pdf"
     
-    # Scan first 10 lines for performance and accuracy
-    lines = [line.strip().lower() for line in text.splitlines() if line.strip()][:10]
+    # 0. Filename Hinting (High Reliability)
+    if filename:
+        fn_lower = filename.lower()
+        if "nmap" in fn_lower or "network_scanner" in fn_lower: return "nmap"
+        if "ssl" in fn_lower or "ssl_scanner" in fn_lower: return "sslscan"
+        if "zap" in fn_lower or "web_scanner" in fn_lower: return "zap"
+        if "pcap" in fn_lower or "sniffer" in fn_lower or "packet_sniffer" in fn_lower: return "pcap"
+        if "sql" in fn_lower or "sql_scanner" in fn_lower: return "sql"
+        if "killchain" in fn_lower or "full_audit" in fn_lower: return "killchain"
+        if "api" in fn_lower or "api_scanner" in fn_lower: return "api"
+        if "semgrep" in fn_lower or "semgrep_scanner" in fn_lower: return "semgrep"
+
+    # Scan first 20 lines for better accuracy in complex layouts
+    lines = [line.strip().lower() for line in text.splitlines() if line.strip()][:20]
     full_header_context = " ".join(lines)
 
     # --- HEADER MAPPING (Ordered by specificity) ---
     
-    # 1. Kill Chain
+    # 1. SSL (More specific than Nmap)
+    if "ssl/tls assessment" in full_header_context or "sslscan" in full_header_context:
+        return "sslscan"
+
+    # 2. Kill Chain
     if "kill chain" in full_header_context:
         return "killchain"
 
-    # 2. NMAP (Checking for common headers found in the PDF templates)
-    if "network scan" in full_header_context or "nmap scan report" in full_header_context or "nmap" in full_header_context:
+    # 3. NMAP / Network Scanner
+    if "nmap scan report" in full_header_context or "network scan report" in full_header_context or ("network scan" in full_header_context and "nmap" in full_header_context):
         return "nmap"
     
-    # 3. PCAP / Sniffer
+    # 4. PCAP / Sniffer
     if "network traffic" in full_header_context or "tshark" in full_header_context or "packet sniffer" in full_header_context:
         return "pcap"
     
-    # 4. ZAP
-    if "web vulnerability" in full_header_context or "owasp zap" in full_header_context:
+    # 5. ZAP / Web Vulnerability
+    if "web vulnerability report" in full_header_context or "web vulnerability" in full_header_context or "owasp zap" in full_header_context:
+        # Check for API hint specifically if it's ZAP-templated
+        if "api" in full_header_context or (filename and "api" in filename.lower()):
+            return "api"
         return "zap"
     
-    # 5. SSL
-    if "ssl/tls assessment" in full_header_context or "sslscan" in full_header_context:
-        return "sslscan"
-    
     # 6. SQL Injection
-    if "sql injection security" in full_header_context or "sqlmap" in full_header_context:
+    if "sql injection audit" in full_header_context or "sql injection security" in full_header_context or "sqlmap" in full_header_context:
         return "sql"
 
     # 7. SAST / Semgrep
-    if "static analysis" in full_header_context or "semgrep" in full_header_context:
+    if "source code security analysis" in full_header_context or "static analysis" in full_header_context or "semgrep" in full_header_context:
         return "semgrep"
 
-    # 8. API Scan
+    # 8. API Scan (Backup)
     if "api security" in full_header_context or "api scan" in full_header_context or "api_scan" in full_header_context:
         return "api"
 
-    # Fallback
-    logger.info(f"No specific report header matched in first 10 lines. Defaulting to generic_pdf.")
+    # Final Fallback
+    if "nmap" in full_header_context:
+        return "nmap"
+    
+    logger.info(f"No specific report header matched in first 20 lines. Defaulting to generic_pdf.")
     return "generic_pdf"
     
 
@@ -589,8 +607,64 @@ async def get_session_graph(session_id: str):
             content={"success": False, "message": "Failed to retrieve graph data."}
         )
 
+# --- BACKGROUND TASK HELPERS ---
+async def run_post_upload_processing(session_id: str, user_id: str, parsed_data: Dict[str, Any], report_type: str, original_filename: str, llm_mode: str):
+    """
+    Background worker for heavy post-upload tasks (Summarization, Graph Building).
+    """
+    try:
+        # 1. Hybrid RAG: Build and Persist Logical Graph
+        if report_type != "generic_pdf":
+            logger.info(f"Background: Building graph for session {session_id}")
+            existing_graph_json = await run_in_threadpool(db_utils.get_session_graph, session_id)
+            current_graph = graph_utils.deserialize_graph(existing_graph_json) if existing_graph_json else graph_utils.create_base_graph()
+            
+            new_graph = await run_in_threadpool(graph_utils.build_graph_from_report, current_graph, parsed_data, report_type)
+            serialized_graph = graph_utils.serialize_graph(new_graph)
+            
+            await run_in_threadpool(db_utils.save_session_graph, session_id, serialized_graph)
+            logger.info(f"Background: Graph built ({new_graph.number_of_nodes()} nodes)")
+
+        # 2. Generate Summary with Failover
+        initial_summary = "Report parsed successfully, but summarization failed."
+        requested_mode = llm_mode
+        if requested_mode in config.LLM_FAILOVER_PRIORITY:
+            idx = config.LLM_FAILOVER_PRIORITY.index(requested_mode)
+            failover_sequence = config.LLM_FAILOVER_PRIORITY[idx:]
+        else:
+            failover_sequence = [requested_mode] + config.LLM_FAILOVER_PRIORITY
+
+        for current_mode in failover_sequence:
+            llm_instance = _llm_instances_global.get(current_mode)
+            llm_generate_func = _llm_generate_funcs_global.get(current_mode)
+            if not llm_instance or not llm_generate_func:
+                continue
+            try:
+                initial_summary = await execute_with_retry(
+                    summarize_report_with_llm,
+                    llm_instance,
+                    llm_generate_func,
+                    parsed_data,
+                    report_type
+                )
+                if current_mode != requested_mode:
+                    initial_summary = f"[Note: Summary generated using {current_mode} failsafe]\n\n" + initial_summary
+                break
+            except Exception as e:
+                logger.warning(f"Background: Summarization failed for {current_mode}: {e}")
+                continue
+
+        # 3. Inject report content info into history (Role: system)
+        report_msg = f"SYSTEM_NOTIFICATION: Scan Complete. {report_type.upper()} Report successfully synchronized. Summary: {initial_summary}"
+        await run_in_threadpool(db_utils.add_message, session_id, "system", report_msg)
+        logger.info(f"Background: Processing complete for session {session_id}")
+
+    except Exception as e:
+        logger.error(f"Error in background upload processing: {e}", exc_info=True)
+
 @app.post("/upload_report")
 async def upload_report(
+    background_tasks: BackgroundTasks,
     file: Optional[UploadFile] = File(None, alias="file"),
     llm_mode: str = Query(config.DEFAULT_LLM_MODE, description=f"Choose LLM mode: {config.SUPPORTED_LLM_MODES}"),
     user_id: str = Query(..., description="Unique user identifier from the client"),
@@ -647,7 +721,7 @@ async def upload_report(
         # 1. Extract text immediately
         extracted_text = extract_text_from_pdf(target_file_to_process)
         # 2. Run detection on the extracted text
-        report_type = detect_report_type_from_content(extracted_text)
+        report_type = detect_report_type_from_content(extracted_text, original_filename)
         # USE PROVIDED SESSION ID OR GENERATE NEW ONE
         if not session_id:
             session_id = str(uuid.uuid4())
@@ -688,66 +762,46 @@ async def upload_report(
             embedding_model = get_embedding_model_instance()
             pinecone_index = get_pinecone_index_instance()
             if embedding_model and pinecone_index:
-                report_namespace = load_report_chunks_and_embeddings(parsed_data, report_type, session_id)
+                # Chunking and embedding is heavy, but we need it done to mark "report loaded"
+                # so we keep it in the main call but run it in a threadpool
+                report_namespace = await run_in_threadpool(load_report_chunks_and_embeddings, parsed_data, report_type, session_id)
             else:
                 logger.warning("RAG components not available.")
+
             # --- Persist Session to Database ---
             try:
                 initial_title = f"{report_type.upper()} Analysis" if report_type != "generic_pdf" else original_filename
-                db_utils.update_or_create_session(
+                await run_in_threadpool(
+                    db_utils.update_or_create_session,
                     user_id=user_id,
                     session_id=session_id,
                     report_type=report_type,
                     pinecone_namespace=report_namespace,
                     parsed_report_data=parsed_data,
                     title=initial_title,
-                    status="ACTIVE" # Clear STATUS_WAITING_FOR_REPORT
+                    status="ACTIVE"
                 )
-                
-                # --- Hybrid RAG: Build and Persist Logical Graph ---
-                if report_type != "generic_pdf":
-                    existing_graph_json = db_utils.get_session_graph(session_id)
-                    current_graph = graph_utils.deserialize_graph(existing_graph_json) if existing_graph_json else graph_utils.create_base_graph()
-                    
-                    new_graph = graph_utils.build_graph_from_report(current_graph, parsed_data, report_type)
-                    serialized_graph = graph_utils.serialize_graph(new_graph)
-                    
-                    db_utils.save_session_graph(session_id, serialized_graph)
-                    logger.info(f"Hybrid RAG: Saved topological graph for session {session_id} ({new_graph.number_of_nodes()} nodes, {new_graph.number_of_edges()} edges)")
-                
             except Exception as e:
-                logger.error(f"Failed to persist session/graph to database: {e}")
-            # --- Generate Summary with Failover ---
-            initial_summary = "Report parsed successfully, but summarization failed."
-            requested_mode = llm_mode
-            if requested_mode in config.LLM_FAILOVER_PRIORITY:
-                idx = config.LLM_FAILOVER_PRIORITY.index(requested_mode)
-                failover_sequence = config.LLM_FAILOVER_PRIORITY[idx:]
-            else:
-                failover_sequence = [requested_mode] + config.LLM_FAILOVER_PRIORITY
-            for current_mode in failover_sequence:
-                llm_instance = _llm_instances_global.get(current_mode)
-                llm_generate_func = _llm_generate_funcs_global.get(current_mode)
-                if not llm_instance or not llm_generate_func:
-                    continue
-                try:
-                    initial_summary = await execute_with_retry(
-                        summarize_report_with_llm,
-                        llm_instance,
-                        llm_generate_func,
-                        parsed_data,
-                        report_type
-                    )
-                    if current_mode != requested_mode:
-                        initial_summary = f"[Note: Summary generated using {current_mode} failsafe]\n\n" + initial_summary
-                    break
-                except Exception as e:
-                    logger.warning(f"Summarization failed for {current_mode}: {e}. Trying failsafe...")
-                    continue
-            # Inject report content info into history (Role: system)
-            report_msg = f"SYSTEM_NOTIFICATION: Scan Complete. {report_type.upper()} Report successfully synchronized. Summary: {initial_summary}"
-            db_utils.add_message(session_id, "system", report_msg)
-            return JSONResponse(content={'success': True, 'summary': initial_summary, 'report_loaded': True, 'session_id': session_id, 'llm_mode': current_mode})
+                logger.error(f"Failed to persist session to database: {e}")
+
+            # --- OFFLOAD HEAVY TASKS TO BACKGROUND ---
+            background_tasks.add_task(
+                run_post_upload_processing, 
+                session_id, 
+                user_id, 
+                parsed_data, 
+                report_type, 
+                original_filename, 
+                llm_mode
+            )
+
+            return JSONResponse(content={
+                'success': True, 
+                'summary': "Report received. Analysis and summary are being generated in the background.", 
+                'report_loaded': True, 
+                'session_id': session_id, 
+                'llm_mode': llm_mode
+            })
         else:
             logger.error(f"Failed to parse data from {original_filename}.")
             return JSONResponse(
@@ -876,8 +930,9 @@ async def chat(chat_message: ChatMessage):
         "   - API Security Scan: Requires 'target_url' and 'definition_url' (Swagger).\n"
         "   - Kill Chain Audit: Requires 'target'. Options: Profile (full_audit, stealth, recon_only).\n"
         "   - Semgrep SAST Scan: Requires 'git_url'.\n"
-        "5. Safety: Prohibit scanning 'localhost' or loopback addresses.\n"
-        "6. Synchronization: When you receive the trigger '[ANALYSIS_TRIGGER]', analyze the summary in 'SYSTEM_NOTIFICATION' and provide a professional breakdown.\n"
+        "5. MANDATORY: ALWAYS ask the user for the specific target and any required/optional configurations before initiating a scan. If the user only says 'run a scan', do NOT guess parameters. Explicitly list the requirements and configurations for the requested tool and wait for their reply before triggering the scan.\n"
+        "6. Safety: Prohibit scanning 'localhost' or loopback addresses.\n"
+        "7. Synchronization: When you receive the trigger '[ANALYSIS_TRIGGER]', analyze the summary in 'SYSTEM_NOTIFICATION' and provide a professional breakdown.\n"
     )
     llm_prompt_content = orchestrator_prompt + system_instruction
     rag_context = ""
@@ -887,7 +942,7 @@ async def chat(chat_message: ChatMessage):
         embedding_model = get_embedding_model_instance()
         pinecone_index = get_pinecone_index_instance()
         if current_report_namespace and embedding_model and pinecone_index:
-            rag_context = retrieve_internal_rag_context(user_question, current_report_namespace, top_k=config.DEFAULT_RAG_TOP_K)
+            rag_context = await run_in_threadpool(retrieve_internal_rag_context, user_question, current_report_namespace, top_k=config.DEFAULT_RAG_TOP_K)
         if rag_context:
             llm_prompt_content += f"Here is some relevant information from the current report:\n{rag_context}\n\n"
         else:
@@ -898,7 +953,7 @@ async def chat(chat_message: ChatMessage):
         embedding_model = get_embedding_model_instance()
         pinecone_index = get_pinecone_index_instance()
         if embedding_model and pinecone_index:
-            rag_context = retrieve_rag_context(user_question, top_k=config.DEFAULT_RAG_TOP_K, namespace="owasp-cybersecurity-kb")
+            rag_context = await run_in_threadpool(retrieve_rag_context, user_question, top_k=config.DEFAULT_RAG_TOP_K, namespace="owasp-cybersecurity-kb")
             if rag_context:
                 llm_prompt_content += f"Here is some relevant information from a cybersecurity knowledge base:\n{rag_context}\n\n"
             else:
@@ -1214,7 +1269,7 @@ async def chat_stream(
         embedding_model = get_embedding_model_instance()
         pinecone_index = get_pinecone_index_instance()
         if current_report_namespace and embedding_model and pinecone_index:
-            rag_context = retrieve_internal_rag_context(user_question, current_report_namespace, top_k=config.DEFAULT_RAG_TOP_K)
+            rag_context = await run_in_threadpool(retrieve_internal_rag_context, user_question, current_report_namespace, top_k=config.DEFAULT_RAG_TOP_K)
         if rag_context:
             llm_prompt_content += f"Here is some relevant information from the current report:\n{rag_context}\n\n"
             llm_prompt_content += f"The user is asking a question related to the previously provided {str(current_report_type).upper()} document/report.\n"
@@ -1224,7 +1279,7 @@ async def chat_stream(
         embedding_model = get_embedding_model_instance()
         pinecone_index = get_pinecone_index_instance()
         if embedding_model and pinecone_index:
-            rag_context = retrieve_rag_context(user_question, top_k=config.DEFAULT_RAG_TOP_K, namespace="owasp-cybersecurity-kb")
+            rag_context = await run_in_threadpool(retrieve_rag_context, user_question, top_k=config.DEFAULT_RAG_TOP_K, namespace="owasp-cybersecurity-kb")
             if rag_context:
                 llm_prompt_content += f"Here is some relevant information from a cybersecurity knowledge base:\n{rag_context}\n\n"
             
@@ -1388,7 +1443,7 @@ async def chat(
     chat_history_db = db_utils.get_chat_history(session_id, limit=config.CHAT_HISTORY_MAX_TURNS)
     chat_history = [{"role": row['role'], "content": row['content']} for row in chat_history_db[:-1]] # Exclude the message we just added
     
-    prompt = f"System: NetShieldAI Orchestrator.\n"
+    prompt = f"System: NetShieldAI Orchestrator.\n{orchestrator_prompt}\n"
     for m in chat_history:
         prompt += f"{m['role'].capitalize()}: {m['content']}\n"
     prompt += f"User: {augmented_question}\nAssistant:"

@@ -26,6 +26,8 @@ def parse_sql_report(raw_text: str) -> Dict[str, Any]:
     # --- 1. Clean Text ---
     # Remove "Page X of Y" artifacts
     clean_text = re.sub(r'Page \d+ of \d+', '', raw_text)
+    # Remove generated on timestamp
+    clean_text = re.sub(r'GENERATED ON \d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2} // CONFIDENTIAL SECURITY DOCUMENT', '', clean_text)
     # Normalize line endings to simple \n
     clean_text = re.sub(r'\r\n|\r', '\n', clean_text).strip()
 
@@ -38,83 +40,76 @@ def parse_sql_report(raw_text: str) -> Dict[str, Any]:
 
     # --- 2. Extract Metadata (Header Section) ---
     
-    # Target URL - Stops before "SCAN DATE" to handle multiline URLs
-    target_match = re.search(r'TARGET URL\s*\n?(.*?)(?=\s*SCAN DATE)', clean_text, re.DOTALL)
+    # Target Host - Handles multiline target host
+    target_match = re.search(r'TARGET HOST\s*\n(.*?)\n(.*?)SCAN TIMESTAMP', clean_text, re.DOTALL | re.IGNORECASE)
     if target_match:
-        report_data["metadata"]["target_url"] = target_match.group(1).replace('\n', '').strip()
+        report_data["metadata"]["target_url"] = target_match.group(1).strip() + target_match.group(2).strip()
 
-    # Scan Date
-    date_match = re.search(r'SCAN DATE\s*(\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2})', clean_text)
+    # Scan Timestamp
+    date_match = re.search(r'SCAN TIMESTAMP\s*\n?(\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2})', clean_text)
     if date_match:
         report_data["metadata"]["scan_date"] = date_match.group(1)
 
-    # Database Status (e.g., Exposed)
-    status_match = re.search(r'DATABASE STATUS\s*([A-Za-z]+)', clean_text, re.IGNORECASE)
+    # Database Status (AUDIT STATUS)
+    status_match = re.search(r'DATA EXFILTRATION[^\n]*\n?([A-Z]+)\s*\n?AUDIT STATUS', clean_text)
     if status_match:
         report_data["metadata"]["database_status"] = status_match.group(1).strip()
-
-    # Data Extraction Status (e.g., No)
-    extraction_match = re.search(r'DATA EXTRACTION\s*([A-Za-z]+)', clean_text, re.IGNORECASE)
+    
+    # Data Extraction Status
+    extraction_match = re.search(r'UNIQUE VECTORS[^\n]*\n?(No|Yes)(?=\n?DATA EXFILTRATION)', clean_text, re.IGNORECASE)
+    if not extraction_match:
+        extraction_match = re.search(r'DATA EXFILTRATION(No|Yes)', clean_text, re.IGNORECASE)
     if extraction_match:
         report_data["metadata"]["data_extraction"] = extraction_match.group(1).strip()
 
     # --- 3. Extract Counts ---
     
-    # Vulnerabilities Found
-    vuln_count = re.search(r'VULNERABILITIES\s*FOUND\s*(\d+)', clean_text)
+    # Vulnerabilities Found (TOTAL FINDINGS)
+    vuln_count = re.search(r'TOTAL FINDINGS(\d+)', clean_text)
     if vuln_count:
         report_data["summary_counts"]["vulnerabilities_found"] = int(vuln_count.group(1))
 
-    # Injection Types (looks for number AFTER the label)
-    inj_count = re.search(r'INJECTION TYPES\s*(\d+)', clean_text)
-    if inj_count:
+    # Injection Types (UNIQUE VECTORS)
+    inj_count = re.search(r'UNIQUE VECTORS(\d+|\w+)?', clean_text)
+    if inj_count and inj_count.group(1) and inj_count.group(1).isdigit():
         report_data["summary_counts"]["injection_types_count"] = int(inj_count.group(1))
 
     # --- 4. Database Fingerprinting ---
     
     # Detected DBMS
-    dbms_match = re.search(r'DETECTED DBMS\s*([^\n]+)', clean_text)
+    dbms_match = re.search(r'DBMS\s+(.*)', clean_text)
     if dbms_match:
         report_data["database_fingerprint"]["detected_dbms"] = dbms_match.group(1).strip()
 
     # Database Version 
-    db_ver_match = re.search(r'DATABASE\s+VERSION\s*([^\n]+)', clean_text)
-    if db_ver_match:
-        report_data["database_fingerprint"]["version"] = db_ver_match.group(1).strip()
+    ver_match = re.search(r'Version\s+(.*)', clean_text)
+    if ver_match:
+        report_data["database_fingerprint"]["version"] = ver_match.group(1).strip()
 
     # Current User
-    user_match = re.search(r'CURRENT USER\s*([^\n]+)(?=\s+CURRENT DATABASE)', clean_text)
+    user_match = re.search(r'Current User\s+(.*)', clean_text)
     if user_match:
         report_data["database_fingerprint"]["current_user"] = user_match.group(1).strip()
 
     # Current Database
-    curr_db_match = re.search(r'CURRENT DATABASE\s*([^\n]+)', clean_text)
-    if curr_db_match:
-        report_data["database_fingerprint"]["current_database"] = curr_db_match.group(1).strip()
+    db_match = re.search(r'Database\s+(.*)', clean_text)
+    if db_match:
+        report_data["database_fingerprint"]["current_database"] = db_match.group(1).replace('🛡️', '').strip()
 
-    # --- 5. Extract Vulnerabilities (Universal Fix) ---
+    # --- 5. Extract Vulnerabilities ---
     
     # Split "Header" from "Body" to clean up the first title
     parts = clean_text.split("VULNERABILITY ANALYSIS")
     body_text = parts[1] if len(parts) > 1 else clean_text
 
-    # UNIVERSAL REGEX EXPLANATION:
-    # 1. (?P<title>[A-Z].*?)      -> Starts with ANY Capital letter (MySQL, Oracle, PostgreSQL)
-    # 2. (?P<sep>[\s\)])          -> Separator (space or closing paren)
-    # 3. (?P<risk>HIGH|MEDIUM...) -> Risk Level
-    # 4. (?=...[A-Z][a-z]+...)    -> Lookahead stops at next Title (Word starting with Cap)
-    
     vuln_pattern = re.compile(
-        r'(?P<title>[A-Z].*?)'                          # Title (DBMS Agnostic)
-        r'(?P<sep>[\s\)])'                              # Separator
-        r'(?P<risk>HIGH|MEDIUM|LOW|CRITICAL)\s*'        # Risk Level
-        r'RISK\s*'                                      # Literal "RISK"
-        r'INJECTION TYPE\s+(?P<type>.*?)\s+'            # Injection Type
-        r'INJECTION PAYLOAD\s+(?P<payload>.*?)\s+'      # Payload
-        r'REMEDIATION\s+(?P<remediation>.*?)'           # Remediation
-        # Stop at Footer, NetShieldAI, or Next Vulnerability Title (Capitalized word)
-        r'(?=\s+NETSHIELDAI|\s+[A-Z][a-z]+|\s+Page|$)',       
-        re.DOTALL | re.IGNORECASE
+        r'(?P<title>.+?)(?P<risk>HIGH RISK|MEDIUM RISK|LOW RISK|CRITICAL RISK)\s*'
+        r'ATTACK VECTOR TYPE\s*'
+        r'(?P<type>.+?)AFFECTED PARAMETER\s*'
+        r'(?P<param>.+?)\s*'
+        r'INJECTED PAYLOAD\s*'
+        r'(?P<payload>.+?)(?=(?:[A-Z].+?(?:HIGH RISK|MEDIUM RISK|LOW RISK|CRITICAL RISK))|$)',
+        re.DOTALL
     )
 
     for match in vuln_pattern.finditer(body_text):
@@ -124,11 +119,15 @@ def parse_sql_report(raw_text: str) -> Dict[str, Any]:
         
         # Clean payload/remediation
         clean_payload = re.sub(r'\s+', ' ', match.group("payload").strip())
-        clean_remediation = re.sub(r'\s+', ' ', match.group("remediation").strip())
+        
+        # New reports don't have remediation section, use default
+        clean_remediation = "Apply parameterized queries (Prepared Statements) to mitigate SQL injection."
+
+        risk = match.group("risk").replace(" RISK", "").strip()
 
         item = {
             "title": clean_title,
-            "risk_level": match.group("risk").strip(),
+            "risk_level": risk,
             "injection_type": match.group("type").strip(),
             "payload": clean_payload,
             "remediation": clean_remediation

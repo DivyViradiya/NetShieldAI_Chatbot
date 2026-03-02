@@ -15,11 +15,11 @@ SECURITY_TOOLS = [
                         "scan_type": {
                             "type": "string", 
                             "enum": ["default", "os", "fragmented", "aggressive", "tcp_syn", "vuln", "udp", "ping_sweep", "tcp_connect", "null", "fin", "xmas", "ack", "window", "decoy"],
-                            "default": "default"
+                            "description": "The Nmap scan type. Always ask the user to choose."
                         },
-                        "timing": {"type": "integer", "description": "Timing template (0-5).", "default": 4}
+                        "timing": {"type": "integer", "description": "Timing template (0-5). Always ask the user to choose."}
                     },
-                    "required": ["target_ip"]
+                    "required": ["target_ip", "protocol_type", "scan_type", "timing"]
                 }
             },
             {
@@ -29,11 +29,11 @@ SECURITY_TOOLS = [
                     "type": "object",
                     "properties": {
                         "target_url": {"type": "string", "description": "The full website URL to scan (e.g., 'http://testphp.vulnweb.com')."},
-                        "scan_mode": {"type": "string", "enum": ["Quick Scan", "Full Scan"], "default": "Quick Scan"},
-                        "use_ajax": {"type": "boolean", "description": "Set to true to use AJAX Spider for modern SPAs/dynamic sites.", "default": False},
+                        "scan_mode": {"type": "string", "enum": ["Quick Scan", "Full Scan"], "description": "Select Quick or Full. Always ask the user."},
+                        "use_ajax": {"type": "boolean", "description": "Set to true to use AJAX Spider for modern SPAs/dynamic sites. Always ask the user."},
                         "auth_config": {
                             "type": "object",
-                            "description": "Optional configuration for Form-Based Authentication.",
+                            "description": "Optional configuration for Form-Based Authentication. You do not strictly have to ask for this if unneeded.",
                             "properties": {
                                 "login_url": {"type": "string"},
                                 "username_field": {"type": "string"},
@@ -43,7 +43,7 @@ SECURITY_TOOLS = [
                             }
                         }
                     },
-                    "required": ["target_url"]
+                    "required": ["target_url", "scan_mode", "use_ajax"]
                 }
             },
             {
@@ -64,9 +64,9 @@ SECURITY_TOOLS = [
                     "type": "object",
                     "properties": {
                         "target_url": {"type": "string", "description": "The target URL to test for SQLi."},
-                        "scan_mode": {"type": "string", "enum": ["quick", "full", "deep"], "default": "quick"}
+                        "scan_mode": {"type": "string", "enum": ["quick", "full", "deep"], "description": "Select the verbosity level. Always ask the user."}
                     },
-                    "required": ["target_url"]
+                    "required": ["target_url", "scan_mode"]
                 }
             },
             {
@@ -76,10 +76,10 @@ SECURITY_TOOLS = [
                     "type": "object",
                     "properties": {
                         "target_ip": {"type": "string", "description": "IP address to monitor traffic for."},
-                        "duration": {"type": "integer", "description": "Seconds to capture packets. Ask user if not specified.", "default": 30},
-                        "max_packets": {"type": "integer", "description": "Maximum packets to capture. Ask user if not specified.", "default": 50}
+                        "duration": {"type": "integer", "description": "Seconds to capture packets. ALWAYS ask user."},
+                        "max_packets": {"type": "integer", "description": "Maximum packets to capture. ALWAYS ask user."}
                     },
-                    "required": ["target_ip"]
+                    "required": ["target_ip", "duration", "max_packets"]
                 }
             },
             {
@@ -102,10 +102,10 @@ SECURITY_TOOLS = [
                     "type": "object",
                     "properties": {
                         "target": {"type": "string", "description": "The target domain or URL for the audit."},
-                        "profile": {"type": "string", "enum": ["Recon Only", "Network Audit", "Web Audit", "Full Scan"], "default": "Full Scan"},
-                        "aggression": {"type": "string", "enum": ["Normal", "Stealth", "Attack"], "default": "Normal"}
+                        "profile": {"type": "string", "enum": ["Recon Only", "Network Audit", "Web Audit", "Full Scan"], "description": "Audit profile type. ALWAYS ask user."},
+                        "aggression": {"type": "string", "enum": ["Normal", "Stealth", "Attack"], "description": "Intensity level. ALWAYS ask user."}
                     },
-                    "required": ["target"]
+                    "required": ["target", "profile", "aggression"]
                 }
             },
             {
