@@ -623,21 +623,28 @@ def _format_api_scan_summary_prompt(parsed_data: Dict[str, Any]) -> str:
         "--- START API SCAN RAW DATA ---\n"
     )
     
-    meta = parsed_data.get("scan_metadata", {})
-    summary = parsed_data.get("alert_summary", {})
+    # Actual JSON fields from api_scanner: summary (not alert_summary), risk (not risk_level)
+    summary = parsed_data.get("summary", parsed_data.get("alert_summary", {}))
     findings = parsed_data.get("findings", [])
+    target_url = parsed_data.get("target_url", "N/A")
+    scan_date = parsed_data.get("scan_date", "N/A")
 
-    prompt += f"Tool: {meta.get('tool', 'API Scanner')}\n"
-    prompt += f"Summary: High={summary.get('High', 0)}, Medium={summary.get('Medium', 0)}, Low={summary.get('Low', 0)}, Info={summary.get('Info', 0)}\n\n"
+    prompt += f"Target URL: {target_url}\n"
+    prompt += f"Scan Date: {scan_date}\n"
+    prompt += f"Summary: High={summary.get('High', 0)}, Medium={summary.get('Medium', 0)}, Low={summary.get('Low', 0)}, Info={summary.get('Info', 0)}, Total={summary.get('Total', 0)}\n\n"
 
     prompt += "## DETAILED FINDINGS\n"
-    for i, f in enumerate(findings[:15], 1): # Limit to 15 findings
+    for i, f in enumerate(findings[:15], 1):
         prompt += f"--- FINDING #{i} ---\n"
         prompt += f"Name: {f.get('name')}\n"
-        prompt += f"Risk: {f.get('risk_level')}\n"
-        prompt += f"Endpoint: {f.get('url')}\n"
-        prompt += f"Description: {f.get('description')}\n"
-        prompt += f"Remediation: {f.get('solution')}\n\n"
+        prompt += f"Risk: {f.get('risk') or f.get('risk_level', 'N/A')}\n"
+        prompt += f"Priority: {f.get('priority_level', 'N/A')}\n"
+        prompt += f"Endpoint: [{f.get('method', 'GET')}] {f.get('url', 'N/A')}\n"
+        prompt += f"TCTR Score: {f.get('tctr_priority', 'N/A')} (Base: {f.get('base_score', 'N/A')})\n"
+        prompt += f"Description: {f.get('description', 'N/A')}\n"
+        if f.get('solution'):
+            prompt += f"Remediation: {f.get('solution')}\n"
+        prompt += f"Justification: {f.get('risk_justification', 'N/A')}\n\n"
 
     prompt += "--- END API SCAN RAW DATA ---\n"
     return prompt
@@ -729,7 +736,7 @@ async def summarize_report_with_llm(
         prompt = _format_sql_summary_prompt(parsed_data)
     elif report_type.lower() == "killchain":
         prompt = _format_killchain_summary_prompt(parsed_data)
-    elif report_type.lower() == "api_scanner":
+    elif report_type.lower() in ("api_scanner", "api"):
         prompt = _format_api_scan_summary_prompt(parsed_data)
     elif report_type.lower() == "semgrep":
         prompt = _format_semgrep_summary_prompt(parsed_data)

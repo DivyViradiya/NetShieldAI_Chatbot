@@ -397,15 +397,17 @@ def _chunk_zap_report(parsed_data: Dict[str, Any]) -> List[Dict[str, Any]]:
 
 def _chunk_api_report(parsed_data: Dict[str, Any]) -> List[Dict[str, Any]]:
     """
-    Chunks API Scanner report data into granular units. 
-    Similar to ZAP as they share a reporting engine structure.
+    Chunks API Scanner report data into granular units.
+    Uses actual api_scanner JSON field names: 'summary', 'risk', 'priority_level', etc.
     """
     chunks = []
-    meta = parsed_data.get("scan_metadata", {})
-    summary = parsed_data.get("alert_summary", {})
-    
+    summary = parsed_data.get("summary", parsed_data.get("alert_summary", {}))
+    target_url = parsed_data.get("target_url", "N/A")
+    scan_date = parsed_data.get("scan_date", "N/A")
+
     overview_text = (
-        f"API Security Scan Report. Tool: {meta.get('tool', 'API Scanner')}. "
+        f"API Security Scan Report. Target: {target_url}. "
+        f"Scan Date: {scan_date}. "
         f"Risk Breakdown: High={summary.get('High', 0)}, "
         f"Medium={summary.get('Medium', 0)}, "
         f"Low={summary.get('Low', 0)}, "
@@ -417,25 +419,33 @@ def _chunk_api_report(parsed_data: Dict[str, Any]) -> List[Dict[str, Any]]:
     findings = parsed_data.get("findings", [])
     for i, finding in enumerate(findings):
         name = finding.get('name', 'Unknown')
-        risk = finding.get('risk_level', 'Info')
+        risk = finding.get('risk') or finding.get('risk_level', 'Info')
         url = finding.get('url', 'N/A')
+        method = finding.get('method', 'GET')
         description = finding.get('description', 'N/A')
-        solution = finding.get('solution', 'N/A')
-        
-        # Combine details into one dense chunk
+        solution = finding.get('solution', '')
+        priority = finding.get('priority_level', 'N/A')
+        justification = finding.get('risk_justification', '')
+
         chunk_text = (
-            f"API Vulnerability: '{name}' (Risk: {risk}). "
-            f"Affected Endpoint: {url}. "
+            f"API Vulnerability: '{name}' (Risk: {risk}, Priority: {priority}). "
+            f"Affected Endpoint: [{method}] {url}. "
             f"Description: {description} "
-            f"Remediation: {solution}"
+            f"Justification: {justification}"
         )
-        
+        if solution:
+            chunk_text += f" Remediation: {solution}"
+
+        if risk.upper() == "HIGH":
+            chunk_text = f"CRITICAL PRIORITY: {chunk_text}"
+
         chunks.append({
             "text": chunk_text,
             "id_suffix": f"api_vuln_{i}"
         })
 
     return chunks
+
 
 def _chunk_sslscan_report(parsed_data: Dict[str, Any]) -> List[Dict[str, Any]]:
     """
@@ -925,7 +935,7 @@ def load_report_chunks_and_embeddings(parsed_report_data: Dict[str, Any], report
         raw_chunks_with_metadata = _chunk_sql_report(parsed_report_data)
     elif report_type.lower() == "killchain":
         raw_chunks_with_metadata = _chunk_killchain_report(parsed_report_data)
-    elif report_type.lower() == "api_scanner":
+    elif report_type.lower() in ("api_scanner", "api"):
         raw_chunks_with_metadata = _chunk_api_report(parsed_report_data)
     elif report_type.lower() == "semgrep":
         raw_chunks_with_metadata = _chunk_semgrep_report(parsed_report_data)
