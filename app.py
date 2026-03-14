@@ -658,9 +658,11 @@ async def run_post_upload_processing(session_id: str, user_id: str, parsed_data:
         report_msg = f"SYSTEM_NOTIFICATION: Scan Complete. {report_type.upper()} Report successfully synchronized. Summary: {initial_summary}"
         await run_in_threadpool(db_utils.add_message, session_id, "system", report_msg)
         logger.info(f"Background: Processing complete for session {session_id}")
+        return initial_summary
 
     except Exception as e:
         logger.error(f"Error in background upload processing: {e}", exc_info=True)
+        return "Report parsed successfully, but summarization failed due to an error."
 
 @app.post("/upload_report")
 async def upload_report(
@@ -669,13 +671,14 @@ async def upload_report(
     llm_mode: str = Query(config.DEFAULT_LLM_MODE, description=f"Choose LLM mode: {config.SUPPORTED_LLM_MODES}"),
     user_id: str = Query(..., description="Unique user identifier from the client"),
     session_id: Optional[str] = Query(None, description="Existing session ID to attach this report to"),
-    file_path: Optional[str] = Query(None, description="Direct absolute path to the PDF on the server's disk")
+    file_path: Optional[str] = Query(None, description="Direct absolute path to the PDF on the server's disk"),
+    background: bool = Query(True, description="Whether to run summarization and graph building in the background")
 ):
     """
     Handles file uploads OR path-based analysis.
     Path-based analysis (file_path) is faster as it skips binary transfer.
     """
-    logger.info(f"Report Request - User: {user_id}, Session: {session_id}, Path-based: {bool(file_path)}")
+    logger.info(f"Report Request - User: {user_id}, Session: {session_id}, Path-based: {bool(file_path)}, Background: {background}")
     # 1. Validation: We need EITHER a file upload OR a local file path
     if not file and not file_path:
         return JSONResponse(
@@ -784,20 +787,31 @@ async def upload_report(
             except Exception as e:
                 logger.error(f"Failed to persist session to database: {e}")
 
-            # --- OFFLOAD HEAVY TASKS TO BACKGROUND ---
-            background_tasks.add_task(
-                run_post_upload_processing, 
-                session_id, 
-                user_id, 
-                parsed_data, 
-                report_type, 
-                original_filename, 
-                llm_mode
-            )
+            # --- PROCESS WITH SYNC/ASYNC OPTION ---
+            if background:
+                background_tasks.add_task(
+                    run_post_upload_processing, 
+                    session_id, 
+                    user_id, 
+                    parsed_data, 
+                    report_type, 
+                    original_filename, 
+                    llm_mode
+                )
+                summary_text = "Report received. Analysis and summary are being generated in the background."
+            else:
+                summary_text = await run_post_upload_processing(
+                    session_id,
+                    user_id,
+                    parsed_data,
+                    report_type,
+                    original_filename,
+                    llm_mode
+                )
 
             return JSONResponse(content={
                 'success': True, 
-                'summary': "Report received. Analysis and summary are being generated in the background.", 
+                'summary': summary_text, 
                 'report_loaded': True, 
                 'session_id': session_id, 
                 'llm_mode': llm_mode
