@@ -11,7 +11,7 @@ SECURITY_TOOLS = [
                     "type": "object",
                     "properties": {
                         "target_ip": {"type": "string", "description": "IP address, Domain, or CIDR range (e.g., '192.168.1.1', 'example.com')."},
-                        "protocol_type": {"type": "string", "enum": ["TCP", "UDP"], "default": "TCP"},
+                        "protocol_type": {"type": "string", "enum": ["TCP", "UDP"]},
                         "scan_type": {
                             "type": "string", 
                             "enum": ["default", "os", "fragmented", "aggressive", "tcp_syn", "vuln", "udp", "ping_sweep", "tcp_connect", "null", "fin", "xmas", "ack", "window", "decoy"],

@@ -13,6 +13,8 @@ SUPPORTED_LLM_MODES = [
     "gemini-2.5-pro", 
     "gemini-3-flash-preview", 
     "gemini-3-pro-preview", 
+    "gemini-3.1-flash-lite-preview", 
+    "gemini-3.1-pro-preview", 
     "local"
 ]
 
@@ -23,6 +25,8 @@ LLM_FAILOVER_PRIORITY = [
     "gemini-2.5-pro",
     "gemini-3-flash-preview",
     "gemini-3-pro-preview",
+    "gemini-3.1-flash-lite-preview",
+    "gemini-3.1-pro-preview",
     "local"
 ]
 
