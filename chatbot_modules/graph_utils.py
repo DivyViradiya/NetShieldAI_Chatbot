@@ -83,7 +83,9 @@ def build_graph_from_report(existing_graph: nx.MultiDiGraph, parsed_data: Dict[s
             port_id = f"{p_num}/{p_proto}"
             port_node = f"Port:{port_id}"
             
-            G.add_node(port_node, type="Port", port_id=port_id, number=p_num, protocol=p_proto)
+            G.add_node(port_node, type="Port", port_id=port_id, number=p_num, protocol=p_proto, 
+                       tctr_magnitude=port_info.get('tctr_magnitude_percent'), 
+                       intelligence=port_info.get('intelligence_breakdown'))
             G.add_edge(host_node, port_node, label="EXPOSES", state=port_info.get('state', 'Unknown'))
             
             s_name = port_info.get('service_name', 'Unknown')
@@ -102,8 +104,8 @@ def build_graph_from_report(existing_graph: nx.MultiDiGraph, parsed_data: Dict[s
                 G.add_node(proc_node, type="Process", description=p_desc)
                 G.add_edge(service_node, proc_node, label="EXECUTED_BY")
 
-    # ZAP / API PARSERS (Web Topology)
-    elif tool_type in ["zap", "api"]:
+    # ZAP PARSER (Web Topology)
+    elif tool_type == "zap":
         scan_node = f"ScanEvent:{report_id}"
         alert_summary = parsed_data.get("alert_summary", {})
         G.add_node(scan_node, type="ScanEvent", report_id=report_id, tool=tool_name, generated_at=scan_date, 
@@ -123,12 +125,35 @@ def build_graph_from_report(existing_graph: nx.MultiDiGraph, parsed_data: Dict[s
             G.add_node(ep_node, type="Endpoint", url=ep_url)
             G.add_edge(app_node, ep_node, label="HAS_ENDPOINT")
             
-            v_name = finding.get('name', 'Unknown Vulnerability')
-            vuln_node = f"VulnerabilityType:{v_name}"
-            G.add_node(vuln_node, type="VulnerabilityType", name=v_name, risk_level=finding.get('risk_level', 'Unknown'), 
-                       description=finding.get("description", "")[:50], solution=finding.get("solution", "")[:50])
+            v_title = finding.get('name', 'Unknown Vulnerability')
+            vuln_node = f"VulnerabilityType:{v_title}"
+            G.add_node(vuln_node, type="VulnerabilityType", title=v_title, risk_level=finding.get('risk_level', 'Unknown'))
+            G.add_edge(ep_node, vuln_node, label="VULNERABLE_TO")
+
+    # API SECURITY AUDIT PARSER (API Topology)
+    elif tool_type == "api":
+        scan_node = f"ScanEvent:{report_id}"
+        summary = parsed_data.get("summary", {})
+        meta = parsed_data.get("metadata", {})
+        G.add_node(scan_node, type="ScanEvent", report_id=report_id, tool="API Security Audit", generated_at=scan_date, 
+                   audited_count=summary.get("audited"), findings_total=summary.get("Total", 0))
+        
+        target_url = meta.get("target_url", "Unknown_API")
+        api_node = f"APIAsset:{target_url}"
+        G.add_node(api_node, type="APIAsset", base_url=target_url)
+        G.add_edge(scan_node, api_node, label="ASSESSED_API")
+        
+        for finding in parsed_data.get("findings", []):
+            ep_url = finding.get('url', target_url)
+            ep_node = f"APIEndpoint:{ep_url}"
+            G.add_node(ep_node, type="APIEndpoint", url=ep_url, method=finding.get("method"))
+            G.add_edge(api_node, ep_node, label="HAS_ROUTE")
             
-            G.add_edge(ep_node, vuln_node, label="VULNERABLE_TO", confidence=finding.get('confidence', 'Unknown'), predicted_score=finding.get('predicted_score', 0))
+            v_name = finding.get('name', 'Unknown API Vulnerability')
+            vuln_node = f"VulnerabilityType:{v_name}"
+            G.add_node(vuln_node, type="VulnerabilityType", title=v_name, risk_level=finding.get('risk_level'), 
+                       tctr_impact=finding.get("tctr_magnitude"), ai_logic=finding.get("ai_breakdown")[:200])
+            G.add_edge(ep_node, vuln_node, label="VULNERABLE_TO", priority=finding.get("priority"), cwe=finding.get("cwe"))
 
     # SSL PARSER (Infrastructure & Crypto Topology)
     elif tool_type == "ssl":
@@ -165,13 +190,14 @@ def build_graph_from_report(existing_graph: nx.MultiDiGraph, parsed_data: Dict[s
         for vuln in parsed_data.get("vulnerabilities", []):
             v_name = vuln.get('name', 'SSL Vulnerability')
             vuln_node = f"VulnerabilityType:{v_name}"
-            G.add_node(vuln_node, type="VulnerabilityType", name=v_name, severity=vuln.get("severity"), description=vuln.get("description", "")[:50])
+            G.add_node(vuln_node, type="VulnerabilityType", name=v_name, severity=vuln.get("severity"), description=vuln.get("description", "")[:50], 
+                       tctr_magnitude=vuln.get("tctr_magnitude_percent"), intelligence=vuln.get("intelligence_breakdown"))
             G.add_edge(ep_node, vuln_node, label="VULNERABLE_TO")
 
     # SQL INJECTION PARSER (Database Topology)
     elif tool_type == "sql":
         scan_node = f"ScanEvent:{report_id}"
-        G.add_node(scan_node, type="ScanEvent", report_id=report_id, timestamp=scan_date, tool="SQLi Scanner")
+        G.add_node(scan_node, type="ScanEvent", report_id=report_id, timestamp=scan_date, tool="SQLi Scanner", ml_threat_index=metadata.get("ml_threat_index"))
         
         target = metadata.get("target_url", "Unknown_URL")
         ep_node = f"Endpoint:{target}"
@@ -199,7 +225,7 @@ def build_graph_from_report(existing_graph: nx.MultiDiGraph, parsed_data: Dict[s
             v_name = vuln.get("title", "Unknown SQLi")
             vuln_node = f"VulnerabilityType:{v_name}"
             G.add_node(vuln_node, type="VulnerabilityType", title=v_name, risk_level=vuln.get("risk_level"), remediation=vuln.get("remediation", "")[:50])
-            G.add_edge(ep_node, vuln_node, label="VULNERABLE_TO", injection_type=vuln.get("injection_type"), payload=vuln.get("payload"))
+            G.add_edge(ep_node, vuln_node, label="VULNERABLE_TO", injection_type=vuln.get("injection_type"), payload=vuln.get("payload"), parameter=vuln.get("parameter"))
 
     # SEMGREP PARSER (SAST / Code Topology)
     elif tool_type == "semgrep":
@@ -222,47 +248,29 @@ def build_graph_from_report(existing_graph: nx.MultiDiGraph, parsed_data: Dict[s
 
     # KILLCHAIN PARSER (Attack Path Topology)
     elif tool_type == "killchain":
-        sim_node = f"AttackSimulation:{report_id}"
-        total_critical = sum(1 for v in parsed_data.get("vulnerabilities", []) if v.get("severity", "").upper() == "CRITICAL")
-        total_high = sum(1 for v in parsed_data.get("vulnerabilities", []) if v.get("severity", "").upper() == "HIGH")
-        G.add_node(sim_node, type="AttackSimulation", report_id=report_id, target_profile=metadata.get("profile", "full_audit"), scan_date=scan_date, total_critical=total_critical, total_high=total_high)
-        
-        recon_node = "KillchainPhase:Reconnaissance"
-        weap_node = "KillchainPhase:Weaponization"
-        G.add_node(recon_node, type="KillchainPhase", name="Reconnaissance")
-        G.add_node(weap_node, type="KillchainPhase", name="Weaponization")
-        
-        G.add_edge(sim_node, recon_node, label="MAPPED_TO")
-        G.add_edge(sim_node, weap_node, label="MAPPED_TO")
+        scan_node = f"ScanEvent:{report_id}"
+        meta = parsed_data.get("metadata", {})
+        risks = parsed_data.get("risk_summary", {})
+        G.add_node(scan_node, type="ScanEvent", report_id=report_id, tool="Kill Chain Audit", generated_at=scan_date, 
+                   profile=meta.get("profile"), aggression=meta.get("aggression"),
+                   total_findings=risks.get("total",0), critical_count=risks.get("critical",0))
         
         phases = parsed_data.get("phase_analysis", {})
-        
         recon = phases.get("recon", {})
-        if "target_ip" in recon:
-            host_node = f"Host:{recon['target_ip']}"
-            G.add_node(host_node, type="Host", ip_address=recon['target_ip'])
-            G.add_edge(host_node, recon_node, label="DISCOVERED_IN")
-            
-        weap = phases.get("weaponization", {})
-        stack_node = None
-        if "server" in weap or "language" in weap:
-            stack_node = f"TechStack:{weap.get('server', 'Unknown')}_{weap.get('language', 'Unknown')}"
-            G.add_node(stack_node, type="TechStack", server_type=weap.get('server'), language=weap.get('language'))
-            G.add_edge(stack_node, weap_node, label="WEAPONIZED_DURING")
-            
+        net = phases.get("network_audit", {})
+        web = phases.get("web_audit", {})
+        traffic = phases.get("traffic_audit", {})
+        
+        target = meta.get("target", "Target")
+        target_node = f"Asset:{target}"
+        G.add_node(target_node, type="Asset", name=target, ip=recon.get("target_ip"), server=recon.get("server"), 
+                   os=net.get("os"), waf=web.get("waf"), packets_captured=traffic.get("packets"))
+        G.add_edge(scan_node, target_node, label="AUDITED")
+        
         for vuln in parsed_data.get("vulnerabilities", []):
-            ep_url = vuln.get("evidence", "Unknown_Endpoint")
-            ep_node = f"Endpoint:{ep_url}"
-            G.add_node(ep_node, type="Endpoint", url=ep_url)
-            
-            if stack_node:
-                G.add_edge(ep_node, stack_node, label="RUNS_ON")
-                
-            v_name = vuln.get("title", "Unknown")
-            vuln_node = f"VulnerabilityType:{v_name}"
-            G.add_node(vuln_node, type="VulnerabilityType", title=v_name, cwe=vuln.get("cwe_id", ""), severity=vuln.get("severity"))
-            
-            G.add_edge(ep_node, vuln_node, label="HAS_WEAPONIZED_EXPLOIT", payload=vuln.get("payload"), parameter=vuln.get("parameter"), evidence=vuln.get("evidence"))
-            G.add_edge(vuln_node, weap_node, label="UTILIZED_IN")
+            v_title = vuln.get("title", "Unknown Finding")
+            vuln_node = f"VulnerabilityType:{v_title}"
+            G.add_node(vuln_node, type="VulnerabilityType", title=v_title, severity=vuln.get("severity"), ml_risk=vuln.get("ml_threat_score"))
+            G.add_edge(target_node, vuln_node, label="VULNERABLE_TO", cwe=vuln.get("cwe"))
 
     return G

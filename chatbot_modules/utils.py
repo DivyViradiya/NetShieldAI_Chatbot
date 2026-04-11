@@ -252,7 +252,9 @@ def _chunk_nmap_report(parsed_data: Dict[str, Any]) -> List[Dict[str, Any]]:
             f"Port {port_num} ({protocol}) is {port_data.get('state', 'Open')}. "
             f"Service Name: {service_name}. "
             f"Service Version: {version_text}. "
-            f"Local Process: {port_data.get('local_process', 'No PID found')}."
+            f"Local Process: {port_data.get('local_process', 'No PID found')}. "
+            f"AI Threat Magnitude: {port_data.get('tctr_magnitude_percent', 'N/A')}%. "
+            f"Intelligence Context: {port_data.get('intelligence_breakdown', 'N/A')}."
         )
         
         chunks.append({
@@ -283,6 +285,7 @@ def _chunk_traffic_report(parsed_data: Dict[str, Any]) -> List[Dict[str, Any]]:
         f"Duration: {metrics.get('duration_sec', 0)}s. "
         f"Volume: {metrics.get('data_volume', '0 KB')}. "
         f"Throughput: {metrics.get('throughput', '0 bps')}. "
+        f"Anomalies Detected: {metadata.get('anomalies_detected', 'Unknown')}. "
         f"Automated Verdict: {security_insights}."
     )
     chunks.append({
@@ -327,6 +330,22 @@ def _chunk_traffic_report(parsed_data: Dict[str, Any]) -> List[Dict[str, Any]]:
             "id_suffix": f"traffic_conn_{safe_dst_ip}_{i}"
         })
 
+    # --- Chunk 4: AI Analyzed Packet Samples (Individual Chunks) ---
+    # Captures specific TCTR magnitude and semantic threats per packet
+    packet_samples = parsed_data.get("packet_sample", [])
+    for i, pkt in enumerate(packet_samples):
+        pkt_text = (
+            f"Packet Security Inspection on {metadata.get('target_node', 'Target')}: "
+            f"Source: {pkt.get('source')} communicated to Destination: {pkt.get('destination')} "
+            f"using Protocol: {pkt.get('protocol')}. "
+            f"AI Threat Magnitude: {pkt.get('tctr_magnitude_percent', 'N/A')}%. "
+            f"Intelligence Context: {pkt.get('intelligence_breakdown', 'N/A')}."
+        )
+        chunks.append({
+            "text": pkt_text,
+            "id_suffix": f"traffic_pkt_{i}"
+        })
+
     return chunks
 
 def _chunk_zap_report(parsed_data: Dict[str, Any]) -> List[Dict[str, Any]]:
@@ -346,7 +365,9 @@ def _chunk_zap_report(parsed_data: Dict[str, Any]) -> List[Dict[str, Any]]:
     summary = parsed_data.get("alert_summary", {})
     
     overview_text = (
-        f"OWASP ZAP Scan Report. Tool: {meta.get('tool', 'OWASP ZAP')}. "
+        f"OWASP ZAP Scan Report for {meta.get('target_url', 'Target')}. "
+        f"Overall Risk Magnitude: {meta.get('risk_magnitude', 'N/A')}. "
+        f"Tool: {meta.get('tool', 'OWASP ZAP')}. "
         f"Report ID: {meta.get('report_id', 'N/A')}. "
         f"Date: {meta.get('generated_at', 'N/A')}. "
         f"Risk Breakdown: High={summary.get('High', 0)}, "
@@ -380,6 +401,8 @@ def _chunk_zap_report(parsed_data: Dict[str, Any]) -> List[Dict[str, Any]]:
             f"Vulnerability Finding: '{name}' (Risk Level: {risk}). "
             f"Affected Asset: {url}. "
             f"Automated Score: {score}. "
+            f"AI Threat Magnitude: {finding.get('tctr_magnitude_percent', 'N/A')}%. "
+            f"Intelligence Context: {finding.get('intelligence_breakdown', 'N/A')}. "
             f"Description: {clean_text(description)} "
             f"Remediation/Solution: {clean_text(solution)}"
         )
@@ -397,51 +420,54 @@ def _chunk_zap_report(parsed_data: Dict[str, Any]) -> List[Dict[str, Any]]:
 
 def _chunk_api_report(parsed_data: Dict[str, Any]) -> List[Dict[str, Any]]:
     """
-    Chunks API Scanner report data into granular units.
-    Uses actual api_scanner JSON field names: 'summary', 'risk', 'priority_level', etc.
+    Chunks API Security Audit report data into granular units for vector search.
     """
     chunks = []
-    summary = parsed_data.get("summary", parsed_data.get("alert_summary", {}))
-    target_url = parsed_data.get("target_url", "N/A")
-    scan_date = parsed_data.get("scan_date", "N/A")
+    meta = parsed_data.get("metadata", {})
+    summary = parsed_data.get("summary", {})
+    target_url = meta.get("target_url", "N/A")
+    scan_date = meta.get("scan_date", "N/A")
 
     overview_text = (
-        f"API Security Scan Report. Target: {target_url}. "
+        f"API Security Audit Report. Target: {target_url}. "
         f"Scan Date: {scan_date}. "
-        f"Risk Breakdown: High={summary.get('High', 0)}, "
+        f"Risk Breakdown: Critical/High={summary.get('High', 0)}, "
         f"Medium={summary.get('Medium', 0)}, "
-        f"Low={summary.get('Low', 0)}, "
-        f"Info={summary.get('Info', 0)}. "
-        f"Total Alerts: {summary.get('Total', 0)}."
+        f"Low/Info={summary.get('Low', 0)}. "
+        f"Audited Endpoints: {summary.get('audited', 0)}."
     )
     chunks.append({"text": overview_text, "id_suffix": "api_overview"})
 
     findings = parsed_data.get("findings", [])
     for i, finding in enumerate(findings):
         name = finding.get('name', 'Unknown')
-        risk = finding.get('risk') or finding.get('risk_level', 'Info')
+        risk = finding.get('risk_level', 'Info')
         url = finding.get('url', 'N/A')
         method = finding.get('method', 'GET')
         description = finding.get('description', 'N/A')
-        solution = finding.get('solution', '')
-        priority = finding.get('priority_level', 'N/A')
-        justification = finding.get('risk_justification', '')
+        priority = finding.get('priority', 'N/A')
+        tctr = finding.get('tctr_magnitude', '0%')
+        ai_breakdown = finding.get('ai_breakdown', 'N/A')
 
         chunk_text = (
-            f"API Vulnerability: '{name}' (Risk: {risk}, Priority: {priority}). "
-            f"Affected Endpoint: [{method}] {url}. "
-            f"Description: {description} "
-            f"Justification: {justification}"
+            f"API Vulnerability: '{name}' on [{method}] {url}. "
+            f"Risk: {risk}, Priority: {priority}. "
+            f"TCTR Impact: {tctr}. "
+            f"AI Analysis: {ai_breakdown} "
+            f"Technical Details: {description[:500]}..."
         )
-        if solution:
-            chunk_text += f" Remediation: {solution}"
 
-        if risk.upper() == "HIGH":
-            chunk_text = f"CRITICAL PRIORITY: {chunk_text}"
+        if risk.upper() in ["CRITICAL", "HIGH"]:
+            chunk_text = f"CRITICAL API SECURITY BREACH POINT: {chunk_text}"
 
         chunks.append({
             "text": chunk_text,
-            "id_suffix": f"api_vuln_{i}"
+            "id_suffix": f"api_vuln_{i}",
+            "metadata": {
+                "risk": risk,
+                "endpoint": url,
+                "tctr": tctr
+            }
         })
 
     return chunks
@@ -490,6 +516,8 @@ def _chunk_sslscan_report(parsed_data: Dict[str, Any]) -> List[Dict[str, Any]]:
             "text": (f"Vulnerability Finding #{idx+1} on {target}: {v.get('name')}. "
                      f"Severity: {v.get('severity')}. "
                      f"Technical Detail: {v.get('description')} "
+                     f"AI Threat Magnitude: {v.get('tctr_magnitude_percent', 'N/A')}%. "
+                     f"Intelligence Context: {v.get('intelligence_breakdown', 'N/A')}. "
                      f"Impact: Attackers may exploit this to intercept encrypted traffic."),
             "metadata": {"source": "vuln_detail", "severity": v.get('severity'), "target": target}
         })
@@ -613,7 +641,9 @@ def _chunk_semgrep_report(parsed_data: Dict[str, Any]) -> List[Dict[str, Any]]:
         
         # Identity Chunk
         chunks.append({
-            "text": f"SAST Finding: Rule {rule} triggered in {file_path} at line {line}. Severity: {severity}.",
+            "text": (f"SAST Finding: Rule {rule} triggered in {file_path} at line {line}. "
+                     f"Severity: {severity}. "
+                     f"Vulnerable Code: {finding.get('vulnerable_code', 'N/A')}."),
             "id_suffix": f"semgrep_finding_{i}_id"
         })
         
@@ -652,12 +682,12 @@ def _chunk_sql_report(parsed_data: Dict[str, Any]) -> List[Dict[str, Any]]:
     db_status = meta.get("database_status") or "Unknown"
 
     # 1. [METADATA] Scan Identity & Target
-    # Matches: "What URL was scanned?", "When was the SQL audit done?"
     chunks.append({
         "text": (f"SQL Injection Scan Target Identity: URL {target}. "
                  f"Scan performed on {scan_date}. "
-                 f"Database Status: {db_status}. "
-                 f"Data Extraction Possible: {meta.get('data_extraction', 'Unknown')}."),
+                 f"Audit Status: {meta.get('audit_status', 'Unknown')}. "
+                 f"ML Threat Index: {meta.get('ml_threat_index', 'N/A')}. "
+                 f"Data Extraction Possible: {meta.get('data_exfiltration', 'Unknown')}."),
         "metadata": {"source": "scan_identity", "target": target}
     })
 
@@ -702,6 +732,7 @@ def _chunk_sql_report(parsed_data: Dict[str, Any]) -> List[Dict[str, Any]]:
             "text": (f"Vulnerability Finding #{idx+1} on {target}: {v.get('title')}. "
                      f"Risk Level: {v.get('risk_level')}. "
                      f"Injection Type: {v.get('injection_type')}. "
+                     f"Affected Parameter: {v.get('parameter', 'N/A')}. "
                      f"Technical Detail: This vector allows attackers to manipulate the query using the payload '{payload_clean}'."),
             "metadata": {"source": "vuln_detail", "risk": v.get('risk_level'), "type": v.get('injection_type'), "target": target}
         })
@@ -804,8 +835,6 @@ def _chunk_killchain_report(parsed_data: Dict[str, Any]) -> List[Dict[str, Any]]
     meta = parsed_data.get("metadata", {})
     risks = parsed_data.get("risk_summary", {})
     phases = parsed_data.get("phase_analysis", {})
-    recon = phases.get("recon", {})
-    tech = phases.get("weaponization", {})
     vulns = parsed_data.get("vulnerabilities", [])
     target = meta.get("target", "Target System")
 
@@ -813,41 +842,33 @@ def _chunk_killchain_report(parsed_data: Dict[str, Any]) -> List[Dict[str, Any]]
     summary_text = (
         f"Kill Chain Audit Summary for {target}. "
         f"Scan Date: {meta.get('scan_date', 'Unknown')}. "
-        f"Total Findings: {risks.get('total', 0)}. "
+        f"Aggression: {meta.get('aggression', 'N/A')}. "
+        f"Total Items: {risks.get('total', 0)}. "
         f"Risk Profile: {risks.get('critical', 0)} Critical, {risks.get('high', 0)} High, "
-        f"{risks.get('medium', 0)} Medium vulnerabilities. "
-        f"Profile: {meta.get('profile', 'Standard Scan')}."
+        f"{risks.get('medium', 0)} Medium / Low findings. "
+        f"Verdict: {meta.get('profile', 'Full Audit')}."
     )
-    # FIX: Wrap in dictionary
     chunks.append({
         "text": summary_text,
         "metadata": {"source": "killchain_summary", "type": "overview"}
     })
 
-    # --- Chunk 2: Phase 1 - Reconnaissance & Attack Surface ---
-    recon_text = (
-        f"Phase 1 Reconnaissance Data for {target}: "
-        f"Host IP: {recon.get('target_ip', 'Unknown')}. "
-        f"Status: {recon.get('status', 'Unknown')}. "
-        f"Open Ports: {', '.join(recon.get('open_ports', []))}. "
-        f"Attack Surface: Found {recon.get('subdomains_count', 0)} subdomains and "
-        f"discovered {recon.get('urls_count', 0)} distinct URLs."
-    )
-    chunks.append({
-        "text": recon_text,
-        "metadata": {"source": "killchain_recon", "type": "recon"}
-    })
+    # --- Chunk 2: Multi-Phase Audit Analysis ---
+    recon = phases.get("recon", {})
+    net = phases.get("network_audit", {})
+    web = phases.get("web_audit", {})
+    traffic = phases.get("traffic_audit", {})
 
-    # --- Chunk 3: Phase 2 - Weaponization (Tech Stack) ---
-    tech_text = (
-        f"Phase 2 Weaponization & Technology Stack for {target}: "
-        f"Server Detected: {tech.get('server', 'Unknown')}. "
-        f"Programming Language: {tech.get('language', 'Unknown')}. "
-        "This technology fingerprint aids in identifying version-specific exploits."
+    audit_text = (
+        f"Kill Chain Phased Audit for {target}: "
+        f"1. Recon: {recon.get('subdomains_count', 0)} subdomains, Server: {recon.get('server', 'N/A')}. "
+        f"2. Network: Status {net.get('status', 'N/A')}, OS {net.get('os', 'N/A')}, Ports: {', '.join(net.get('open_ports', []))[:200]}. "
+        f"3. Web: WAF {web.get('waf', 'N/A')}, Surface {web.get('surface', 'N/A')}. "
+        f"4. Traffic: {traffic.get('packets', 0)} packets captured."
     )
     chunks.append({
-        "text": tech_text,
-        "metadata": {"source": "killchain_tech", "type": "technologies"}
+        "text": audit_text,
+        "metadata": {"source": "killchain_phases", "type": "technical_audit"}
     })
 
     # --- Chunk 4+: Phase 3 - Exploitation (Vulnerabilities) ---
@@ -863,42 +884,36 @@ def _chunk_killchain_report(parsed_data: Dict[str, Any]) -> List[Dict[str, Any]]
         evidence = v.get("evidence", "N/A").replace("\n", " ")
         payload = v.get("payload", "")
         
-        chunk_text = ""
+        # Clean description
+        raw_desc = v.get("description", "").replace("\n", " ")
+        description = (raw_desc[:250] + "...") if len(raw_desc) > 250 else raw_desc
+        ml_score = v.get("ml_threat_score", "N/A")
         
-        # Construct the chunk text based on severity
         if severity in ["CRITICAL", "HIGH"]:
             chunk_text = (
                 f"Confirmed Vulnerability ({severity}): {title} on {target}. "
-                f"Evidence/Location: {evidence}. "
-                f"Payload Used: {payload}. "
+                f"ML Risk Score: {ml_score}/10.0. "
+                f"CWE: {v.get('cwe', 'N/A')}. "
                 f"Context: {description} "
-                f"Remediation: {v.get('remediation', 'Refer to standard security practices for this CWE.')}"
+                f"Remediation: {v.get('remediation', 'N/A')}."
             )
-            
-        elif severity == "MEDIUM":
-            chunk_text = (
-                f"Medium Risk Finding: {title} on {target}. "
-                f"Location: {evidence}. "
-                f"Description: {description}"
-            )
-            
         else:
-            # LOW/INFO
-            if evidence and evidence != "N/A":
-                chunk_text = (
-                    f"Low/Info Finding: {title}. Location: {evidence}."
-                )
-
-        # Only append if text was generated
-        if chunk_text:
-            chunks.append({
-                "text": chunk_text,
-                "metadata": {
-                    "source": "killchain_vuln", 
-                    "severity": severity,
-                    "title": title
-                }
-            })
+            chunk_text = (
+                f"Security Finding ({severity}): {title} on {target}. "
+                f"ML Risk Score: {ml_score}/10.0. "
+                f"CWE: {v.get('cwe', 'N/A')}. "
+                f"Action Recommended: {v.get('remediation', 'N/A')}."
+            )
+        
+        chunks.append({
+            "text": chunk_text,
+            "metadata": {
+                "source": "killchain_vuln",
+                "finding_index": i,
+                "severity": severity,
+                "ml_score": ml_score
+            }
+        })
 
     return chunks
 

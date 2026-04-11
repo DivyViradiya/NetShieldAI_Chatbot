@@ -42,91 +42,104 @@ def parse_killchain_report(raw_text: str) -> Dict[str, Any]:
     # --- 2. Extract Header & Metadata ---
     
     # Target & Profile
-    target_match = re.search(r'TARGET\s*\n?([^\n]+)', clean_text)
+    target_match = re.search(r'TARGET ASSET\s*\n?([^\n]+)', clean_text)
     if target_match:
-        report_data["metadata"]["target"] = target_match.group(1).replace("PROFILE", "").strip()
+        report_data["metadata"]["target"] = target_match.group(1).split("AUDIT PROFILE")[0].strip()
 
-    profile_match = re.search(r'PROFILE\s*\n?([^\n]+)', clean_text)
+    profile_match = re.search(r'AUDIT PROFILE\s*\n?([^\n]+)', clean_text)
     if profile_match:
-        report_data["metadata"]["profile"] = profile_match.group(1).replace("REPORT ID", "").strip()
+        report_data["metadata"]["profile"] = profile_match.group(1).split("AGGRESSION")[0].strip()
 
-    # Report ID & Date
-    rid_match = re.search(r'REPORT ID\s*\n?([^\n]+)', clean_text)
-    if rid_match:
-        report_data["metadata"]["report_id"] = rid_match.group(1).replace("DATE", "").strip()
+    agg_match = re.search(r'AGGRESSION\s*\n?([^\n]+)', clean_text)
+    if agg_match:
+        report_data["metadata"]["aggression"] = agg_match.group(1).split("AUDIT DATE")[0].strip()
 
-    date_match = re.search(r'DATE\s*(\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2})', clean_text)
+    # Scan Date
+    date_match = re.search(r'AUDIT DATE\s*\n?(\d{4}-\d{2}-\d{2})\s*\n?(\d{2}:\d{2}:\d{2})', clean_text)
     if date_match:
-        report_data["metadata"]["scan_date"] = date_match.group(1)
+        report_data["metadata"]["scan_date"] = f"{date_match.group(1)} {date_match.group(2)}"
 
     # --- 3. Extract Risk Summary ---
-    # Looks for "TOTAL FINDINGS\n45CRITICAL\n2HIGH..." pattern
-    # We use regex to find numbers adjacent to the labels
+    def extract_count(label):
+        match = re.search(rf'(\d+)\s*{label}', clean_text, re.IGNORECASE)
+        return int(match.group(1)) if match else 0
+
+    report_data["risk_summary"] = {
+        "total": extract_count("CRITICAL") + extract_count("HIGH RISK") + extract_count("MEDIUM RISK") + extract_count("LOW / INFO"),
+        "critical": extract_count("CRITICAL"),
+        "high": extract_count("HIGH RISK"),
+        "medium": extract_count("MEDIUM RISK"),
+        "low_info": extract_count("LOW / INFO")
+    }
     
-    total_match = re.search(r'TOTAL FINDINGS\s*(\d+)', clean_text)
-    if total_match: report_data["risk_summary"]["total"] = int(total_match.group(1))
-
-    crit_match = re.search(r'CRITICAL\s*(\d+)', clean_text)
-    if crit_match: report_data["risk_summary"]["critical"] = int(crit_match.group(1))
-
-    high_match = re.search(r'HIGH\s*(\d+)', clean_text)
-    if high_match: report_data["risk_summary"]["high"] = int(high_match.group(1))
-
-    med_match = re.search(r'MEDIUM\s*(\d+)', clean_text)
-    if med_match: report_data["risk_summary"]["medium"] = int(med_match.group(1))
-
-    low_match = re.search(r'LOW / INFO\s*(\d+)', clean_text)
-    if low_match: report_data["risk_summary"]["low_info"] = int(low_match.group(1))
+    # Overwrite total if explicitly found
+    total_found = re.search(r'TOTAL FINDINGS\s*(\d+)', clean_text)
+    if total_found:
+         report_data["risk_summary"]["total"] = int(total_found.group(1))
 
     # --- 4. Extract Phase Analysis ---
 
-    # Phase 1: Reconnaissance
-    recon_section = re.search(r'PHASE 1: RECONNAISSANCE(.*?)(?=PHASE 2)', clean_text, re.DOTALL)
+    # Phase 1: RECON & DISCOVERY
+    recon_section = re.search(r'PHASE 1: RECON & DISCOVERY(.*?)(?=PHASE 2)', clean_text, re.DOTALL)
     if recon_section:
         r_text = recon_section.group(1)
         ip_match = re.search(r'Target IP:\s*([^\n]+)', r_text)
         if ip_match: report_data["phase_analysis"]["recon"]["target_ip"] = ip_match.group(1).strip()
         
-        status_match = re.search(r'Status:\s*([^\n]+)', r_text)
-        if status_match: report_data["phase_analysis"]["recon"]["status"] = status_match.group(1).strip()
-        
         sub_match = re.search(r'Subdomains Found:\s*(\d+)', r_text)
         if sub_match: report_data["phase_analysis"]["recon"]["subdomains_count"] = int(sub_match.group(1))
         
-        url_match = re.search(r'URLs Discovered:\s*(\d+)', r_text)
-        if url_match: report_data["phase_analysis"]["recon"]["urls_count"] = int(url_match.group(1))
-        
-        ports_match = re.search(r'OPEN PORTS:\s*\n?(.*)', r_text, re.DOTALL)
-        if ports_match:
-            ports = [p.strip() for p in ports_match.group(1).split('\n') if p.strip()]
-            report_data["phase_analysis"]["recon"]["open_ports"] = ports
+        # Technology Stack
+        tech_match = re.search(r'TECHNOLOGY STACK\s*\n?Server:\s*([^\n]+)', r_text, re.DOTALL)
+        if tech_match: report_data["phase_analysis"]["recon"]["server"] = tech_match.group(1).strip()
 
-    # Phase 2: Weaponization
-    weap_section = re.search(r'PHASE 2: WEAPONIZATION \(TECH\)(.*?)(?=NETSHIELD AGGREGATED)', clean_text, re.DOTALL)
-    if weap_section:
-        w_text = weap_section.group(1)
-        server_match = re.search(r'Server:\s*([^\n]+)', w_text)
-        if server_match: report_data["phase_analysis"]["weaponization"]["server"] = server_match.group(1).strip()
+    # Phase 2: NETWORK AUDIT
+    net_section = re.search(r'PHASE 2: NETWORK AUDIT(.*?)(?=PHASE 3)', clean_text, re.DOTALL)
+    if net_section:
+        n_text = net_section.group(1)
+        status_match = re.search(r'Status:\s*([^\n]+)', n_text)
+        if status_match: report_data["phase_analysis"]["network_audit"] = {"status": status_match.group(1).strip()}
         
-        lang_match = re.search(r'Language:\s*([^\n]+)', w_text)
-        if lang_match: report_data["phase_analysis"]["weaponization"]["language"] = lang_match.group(1).strip()
+        os_match = re.search(r'OS Fingerprint:\s*([^\n]+)', n_text)
+        if os_match: report_data["phase_analysis"]["network_audit"]["os"] = os_match.group(1).strip()
+        
+        ports_match = re.search(r'OPEN PORTS \((\d+)\)\s*\n?(.*?)▸', n_text, re.DOTALL)
+        if ports_match:
+            port_text = ports_match.group(2).replace('\n', ' ')
+            report_data["phase_analysis"]["network_audit"]["open_ports"] = re.findall(r'\d+/\w+ \([^\)]+\)', port_text)
+
+    # Phase 3: WEB APPLICATION AUDIT
+    web_section = re.search(r'PHASE 3: WEB APPLICATION AUDIT(.*?)(?=PHASE 4)', clean_text, re.DOTALL)
+    if web_section:
+        w_text = web_section.group(1)
+        waf_match = re.search(r'WAF Detected:\s*([^\n]+)', w_text)
+        if waf_match: report_data["phase_analysis"]["web_audit"] = {"waf": waf_match.group(1).strip()}
+        
+        surface_match = re.search(r'Surface Area:\s*(.*?)(?=API|$)', w_text, re.DOTALL)
+        if surface_match: report_data["phase_analysis"]["web_audit"]["surface"] = surface_match.group(1).strip()
+
+    # Phase 4: TRAFFIC ANALYSIS
+    traffic_section = re.search(r'PHASE 4: TRAFFIC ANALYSIS(.*?)(?=AGGREGATED SECURITY FINDINGS)', clean_text, re.DOTALL)
+    if traffic_section:
+        t_text = traffic_section.group(1)
+        packets_match = re.search(r'Captured Packets:\s*(\d+)', t_text)
+        if packets_match: report_data["phase_analysis"]["traffic_audit"] = {"packets": int(packets_match.group(1))}
 
     # --- 5. Extract Vulnerabilities ---
     
-    # We split the text to start looking after the header findings
-    # Use "NETSHIELD AGGREGATED FINDINGS" as the start marker
-    parts = clean_text.split("NETSHIELD AGGREGATED FINDINGS")
+    # Split after "AGGREGATED SECURITY FINDINGS"
+    parts = clean_text.split("AGGREGATED SECURITY FINDINGS")
     body_text = parts[1] if len(parts) > 1 else clean_text
 
     # Regex to find vulnerability headers
-    # Handles: "SSRF CRITICAL" or "Cross Site Scripting (Reflected) HIGH" or "SQL Injection HIGH CWE-CWE-89"
-    # Logic: Look for a line ending with a Severity, optionally followed by CWE
-    
+    # Format: [Title] [Risk] [CWE] [Module]
     vuln_pattern = re.compile(
         r'(?P<title>.*?)\s+'  # Title (greedy match until severity)
-        r'(?P<severity>CRITICAL|HIGH|MEDIUM|LOW|INFO)\s*' # Severity
-        r'(?:CWE-(?P<cwe>[A-Za-z0-9\-]+))?\s*$' # Optional CWE (e.g. CWE-CWE-79)
-        , re.MULTILINE
+        r'(?P<severity>CRITICAL|HIGH|MEDIUM|LOW|INFO)\s+' # Severity
+        r'(?P<cwe>CWE-[^\s]+)\s+' # CWE
+        r'(?P<module>NETSHIELD AI|ZAP|NMAP|.*?)' # Tool/Module
+        r'(?=\s*\n|$)', 
+        re.MULTILINE
     )
 
     # Find all matches to calculate chunks
@@ -141,8 +154,10 @@ def parse_killchain_report(raw_text: str) -> Dict[str, Any]:
         
         # Clean up title
         raw_title = match.group("title").strip()
-        # Remove "ZAP:" prefix if present for cleaner display
-        clean_title = raw_title.replace("ZAP:", "").strip()
+        # Remove artifacts like "LOW 1 FINDING(S)"
+        clean_title = re.sub(r'^[A-Z]+\s+\d+\s+FINDING\(S\)', '', raw_title).strip()
+        # Remove "ZAP:" prefix if present
+        clean_title = clean_title.replace("ZAP:", "").strip()
         
         item = {
             "title": clean_title,
@@ -155,31 +170,21 @@ def parse_killchain_report(raw_text: str) -> Dict[str, Any]:
         }
 
         # --- Sub-field Extraction ---
-        # 1. Parameter / Timestamp
-        param_match = re.search(r'PARAMETER:\s*(.*?)(?=\s+TIMESTAMP|$)', content_block)
-        if param_match: item["parameter"] = param_match.group(1).strip()
-
-        # 2. Payload
-        payload_match = re.search(r'PAYLOAD\s*\n(.*?)(?=\n[A-Z]|$)', content_block, re.DOTALL)
-        if payload_match: item["payload"] = payload_match.group(1).strip()
-
-        # 3. Evidence / URL (Handles both "EVIDENCE / URL" and "VULNERABLE URL")
-        evidence_match = re.search(r'(?:EVIDENCE / URL|VULNERABLE URL)\s*\n(.*?)(?=\n[A-Z]|$)', content_block, re.DOTALL)
-        if evidence_match: item["evidence"] = evidence_match.group(1).strip()
-
         # 4. Description
-        desc_match = re.search(r'DESCRIPTION\s*\n(.*?)(?=\n[A-Z]|$)', content_block, re.DOTALL)
+        desc_match = re.search(r'Description:\s*\n?(.*?)(?=Remediation:|ML Risk Assessment:|$)', content_block, re.DOTALL)
         if desc_match: 
-            # Clean up newlines in description
-            desc = desc_match.group(1).replace('\n', ' ').strip()
-            item["description"] = desc
+            item["description"] = desc_match.group(1).replace('\n', ' ').strip()
 
-        # 5. Remediation (Usually in Detailed Insights section)
-        rem_match = re.search(r'SUGGESTED REMEDIATION\s*\n(.*?)(?=\n[A-Z]|$)', content_block, re.DOTALL)
+        # 5. Remediation
+        rem_match = re.search(r'Remediation:\s*\n?(.*?)(?=ML Risk Assessment:|$|NetShieldAI Security Report)', content_block, re.DOTALL)
         if rem_match: 
-            rem = rem_match.group(1).replace('\n', ' ').strip()
-            item["remediation"] = rem
+            item["remediation"] = rem_match.group(1).replace('\n', ' ').strip()
 
+        # 6. ML Risk Assessment
+        ml_match = re.search(r'ML Risk Assessment\s*\n?([\d\.]+)\s*/\s*10\.0', content_block)
+        if ml_match:
+            item["ml_threat_score"] = float(ml_match.group(1))
+            
         report_data["vulnerabilities"].append(item)
 
     return report_data

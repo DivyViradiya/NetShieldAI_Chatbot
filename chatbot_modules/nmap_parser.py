@@ -62,39 +62,43 @@ def parse_nmap_report(raw_nmap_text: str) -> Dict[str, Any]:
     # --- METADATA SECTION ---
     
     # Target Node
-    ip_match = re.search(r"TARGET NODE\s*([\d\.]+)", raw_nmap_text)
+    ip_match = re.search(r"(?:TARGET NODE|TARGET IP)\s*([\d\.]+)", raw_nmap_text)
     if ip_match:
         report["scan_metadata"]["target_ip"] = ip_match.group(1).strip()
 
     # Timestamp
-    date_match = re.search(r"TIMESTAMP\s*(\d{4}-\d{2}-\d{2}\s*\d{2}:\d{2}:\d{2})", raw_nmap_text)
+    date_match = re.search(r"(?:TIMESTAMP|SCAN DATE)\s*(\d{4}-\d{2}-\d{2}[\s\n]+\d{2}:\d{2}:\d{2})", raw_nmap_text)
     if date_match:
         report["scan_metadata"]["scan_date"] = date_match.group(1).replace('\n', ' ')
 
     # Host Status
-    status_match = re.search(r"HOST STATUS\s*(\w+)", raw_nmap_text)
+    status_match = re.search(r"HOST STATUS\s*(UP|DOWN)", raw_nmap_text, re.IGNORECASE)
     if status_match:
-        report["scan_metadata"]["host_status"] = status_match.group(1)
+        report["scan_metadata"]["host_status"] = status_match.group(1).upper()
 
     # CLI Arguments
     args_match = re.search(r"CLI Arguments\s*(.*?)(?=\n[\d\.]+|Security Posture)", raw_nmap_text, re.DOTALL)
+    if not args_match:
+        # Fallback for new format
+        args_match = re.search(r"as:\s*(nmap.*?)(?=\nHost:)", raw_nmap_text, re.DOTALL)
     if args_match:
         clean_args = re.sub(r'\s+', ' ', args_match.group(1)).strip()
         report["scan_metadata"]["scan_arguments"] = clean_args
 
     # Security Posture
-    posture_match = re.search(r"Security Posture\s*(.*?)\n", raw_nmap_text)
+    posture_match = re.search(r"(?:Security Posture|THREAT STATUS)\s*(.*?)\n", raw_nmap_text)
     if posture_match:
         report["scan_metadata"]["security_posture"] = posture_match.group(1).strip()
 
     # Numeric Metrics
-    open_entry_match = re.search(r"OPEN ENTRY POINTS\s*(\d+)", raw_nmap_text)
+    open_entry_match = re.search(r"(?:OPEN ENTRY POINTS|TOTAL SERVICES)\s*(\d+)", raw_nmap_text)
     if open_entry_match:
         report["summary"]["ports_found"] = int(open_entry_match.group(1))
 
-    duration_match = re.search(r"SCAN DURATION\s*([\d\.]+)", raw_nmap_text)
+    duration_match = re.search(r"(?:SCAN DURATION|ACTIVE SCANS)\s*([\d\.]+)", raw_nmap_text)
     if duration_match:
         report["summary"]["scan_duration_sec"] = float(duration_match.group(1))
+
 
 
     # --- PORT PARSING SECTION (Revised Strategy) ---
@@ -103,7 +107,7 @@ def parse_nmap_report(raw_nmap_text: str) -> Dict[str, Any]:
     # This creates a list where item [0] is pre-port text, and subsequent items are the ports.
     # We include the capturing group (the header itself) in the split so we don't lose the Port #.
     
-    port_split_pattern = r"(Port\s+\d+\s+\(\w+\)\s+OPERATIONAL)"
+    port_split_pattern = r"(Port\s+\d+\s+\([\w-]+\)[^\n]*?(?:OPERATIONAL|PRIORITY))"
     chunks = re.split(port_split_pattern, raw_nmap_text, flags=re.IGNORECASE)
     
     # chunks will look like: [IntroText, "Port 80...OPERATIONAL", "Body of Port 80", "Port 443...", "Body of Port 443", ...]
@@ -118,39 +122,48 @@ def parse_nmap_report(raw_nmap_text: str) -> Dict[str, Any]:
             body = chunks[i+1] if i+1 < len(chunks) else ""
             
             # 1. Parse Header for Port Number/Proto
-            header_match = re.search(r"Port\s+(\d+)\s+\((\w+)\)", header, re.IGNORECASE)
+            header_match = re.search(r"Port\s+(\d+)\s+\(([\w-]+)\)", header, re.IGNORECASE)
             port_num = int(header_match.group(1)) if header_match else 0
-            protocol = header_match.group(2).lower() if header_match else "tcp"
             
             # 2. Parse Body for details
             
-            # Service
-            service = "Unknown"
-            svc_match = re.search(r"SERVICE\s*(.*?)\s*STATE", body, re.DOTALL)
-            if svc_match:
-                service = re.sub(r'\s+', '', svc_match.group(1)).strip()
-            
+            # Protocol: Try to find PROTOCOL block in body, else fallback to header
+            proto_match = re.search(r"PROTOCOL\s*(.*?)\s*STATE", body, re.DOTALL | re.IGNORECASE)
+            if proto_match:
+                protocol = proto_match.group(1).strip().lower()
+                service = header_match.group(2) if header_match else "Unknown"
+            else:
+                protocol = header_match.group(2).lower() if header_match else "tcp"
+                svc_match = re.search(r"SERVICE\s*(.*?)\s*STATE", body, re.DOTALL | re.IGNORECASE)
+                service = re.sub(r'\s+', '', svc_match.group(1)).strip() if svc_match else "Unknown"
+
             # State
             state = "Unknown"
-            state_match = re.search(r"STATE\s*(.*?)\s*PROCESS", body, re.DOTALL)
+            state_match = re.search(r"STATE\s*(.*?)\s*(?:PROCESS|SERVICE VERSION)", body, re.DOTALL | re.IGNORECASE)
             if state_match:
                 state = state_match.group(1).strip()
             
             # Process
             process = "Unknown"
-            proc_match = re.search(r"PROCESS\s*(.*?)\s*(?:CPE|VERSION IDENTITY|$)", body, re.DOTALL)
+            proc_match = re.search(r"PROCESS\s*(.*?)\s*(?:CPE|VERSION IDENTITY|$)", body, re.DOTALL | re.IGNORECASE)
             if proc_match:
                 process = re.sub(r'\s+', ' ', proc_match.group(1)).strip()
 
             # Version Identity
             version = None
-            # We look for VERSION IDENTITY, but stop if we hit the end of string
-            ver_match = re.search(r"VERSION IDENTITY:\s*(.*)", body, re.DOTALL)
+            ver_match = re.search(r"(?:VERSION IDENTITY:|SERVICE VERSION)\s*(.*?)\s*(?:CPE|TCTR|$)", body, re.DOTALL | re.IGNORECASE)
             if ver_match:
                 version = ver_match.group(1).strip()
             
-            # Fallback: If version is empty or missing, use service name
-            final_version = version if version else service
+            # Fallback: If version is empty, N/A, or missing, use service name
+            final_version = version if version and version != "N/A" else service
+
+            # TCTR Magnitude & Intelligence Breakdown
+            tctr_mag_match = re.search(r"TCTR THREAT MAGNITUDE\s*([\d\.]+)%", body, re.IGNORECASE)
+            tctr_magnitude = float(tctr_mag_match.group(1)) if tctr_mag_match else None
+            
+            intel_match = re.search(r"Intelligence Breakdown:\s*(.*?)(?:\[|\n|$)", body, re.IGNORECASE)
+            intelligence_breakdown = intel_match.group(1).strip() if intel_match else None
 
             ports_data.append({
                 "port": port_num,
@@ -158,7 +171,9 @@ def parse_nmap_report(raw_nmap_text: str) -> Dict[str, Any]:
                 "state": state,
                 "service_name": service,
                 "service_version": final_version,
-                "local_process": process
+                "local_process": process,
+                "tctr_magnitude_percent": tctr_magnitude,
+                "intelligence_breakdown": intelligence_breakdown
             })
 
     report["open_ports"] = ports_data

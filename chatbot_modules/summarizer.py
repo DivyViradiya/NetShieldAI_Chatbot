@@ -102,7 +102,9 @@ def _format_nmap_summary_prompt(parsed_data: Dict[str, Any]) -> str:
                 f"- Port {p.get('port')}/{p.get('protocol')} ({p.get('state')}): "
                 f"Service='{p.get('service_name')}', "
                 f"Version='{display_version}', "
-                f"Process='{p.get('local_process')}'"
+                f"Process='{p.get('local_process')}', "
+                f"AI Threat Magnitude='{p.get('tctr_magnitude_percent', 'N/A')}%', "
+                f"Intelligence='{p.get('intelligence_breakdown', 'N/A')}'"
             )
         ports_block = "\n".join(ports_block_lines)
     else:
@@ -404,10 +406,12 @@ def _format_traffic_analysis_prompt(parsed_data: Dict[str, Any]) -> str:
     metrics           = parsed_data.get("traffic_metrics", {})
     protocols         = parsed_data.get("protocol_hierarchy", [])
     conversations     = parsed_data.get("active_conversations", [])
+    packet_samples    = parsed_data.get("packet_sample", [])
     security_insights = parsed_data.get("security_insights", "N/A")
 
     target_node = metadata.get("target_node", "N/A")
     scan_date   = metadata.get("scan_date", "N/A")
+    anomalies   = metadata.get("anomalies_detected", "Unknown")
     duration    = metrics.get("duration_sec", 0)
     volume      = metrics.get("data_volume", "N/A")
     throughput  = metrics.get("throughput", "N/A")
@@ -441,6 +445,19 @@ def _format_traffic_analysis_prompt(parsed_data: Dict[str, Any]) -> str:
         conversations_block = "\n".join(conv_lines)
     else:
         conversations_block = "No conversation data available."
+
+    # --- 4b. Build Packet Samples Block ---
+    if packet_samples:
+        pkt_lines = ["### Packet Threat Samples (AI Analyzed):"]
+        for p in packet_samples:
+            pkt_lines.append(
+                f"- Seq: {p.get('source')} -> {p.get('destination')} ({p.get('protocol')}), "
+                f"Threat Magnitude: {p.get('tctr_magnitude_percent', 'N/A')}%, "
+                f"Intelligence: {p.get('intelligence_breakdown', 'N/A')}"
+            )
+        packets_block = "\n".join(pkt_lines)
+    else:
+        packets_block = "No packet analysis data available."
 
     # --- 5. Compose Prompt ---
     prompt = f"""\
@@ -740,6 +757,7 @@ Scan Date            : {scan_date}
 Capture Duration     : {duration_label}
 Total Data Volume    : {volume}
 Throughput           : {throughput}
+Anomalies Detected   : {anomalies}
 Automated Verdict    : {security_insights}
 Scan Coverage        : {scan_coverage}
 Scan Limitations     : {scan_limitations}
@@ -747,6 +765,8 @@ Scan Limitations     : {scan_limitations}
 {protocols_block}
 
 {conversations_block}
+
+{packets_block}
 ================================================================================
 [END OF CAPTURE DATA]
 ================================================================================
@@ -774,6 +794,7 @@ def _format_zap_summary_prompt(parsed_data: Dict[str, Any]) -> str:
 
     target_url         = metadata.get("target_url", "N/A")
     generated_at       = metadata.get("generated_at", "N/A")
+    risk_magnitude     = metadata.get("risk_magnitude", "N/A")
     tool               = metadata.get("tool", "ZAP Scanner")
     endpoints_tested   = metadata.get("endpoints_tested", "Unknown")
     authenticated_scan = metadata.get("authenticated_scan", "Unknown")
@@ -809,7 +830,9 @@ def _format_zap_summary_prompt(parsed_data: Dict[str, Any]) -> str:
             hm_lines.append(f"Risk Level  : {f.get('risk_level', 'N/A')}")
             hm_lines.append(f"Affected URL: {f.get('url', 'N/A')}")
             hm_lines.append(f"Description : {f.get('description', 'N/A')}")
-            hm_lines.append(f"Solution    : {f.get('solution', 'N/A')}\n")
+            hm_lines.append(f"Solution    : {f.get('solution', 'N/A')}")
+            hm_lines.append(f"Threat Mag  : {f.get('tctr_magnitude_percent', 'N/A')}%")
+            hm_lines.append(f"Intelligence: {f.get('intelligence_breakdown', 'N/A')}\n")
         high_medium_block = "\n".join(hm_lines)
     else:
         high_medium_block = "### High & Medium Risk Findings:\nNo critical vulnerabilities found."
@@ -822,7 +845,11 @@ def _format_zap_summary_prompt(parsed_data: Dict[str, Any]) -> str:
             name = f.get("name", "N/A")
             risk = f.get("risk_level", "N/A")
             if name not in seen_names:
-                low_lines.append(f"- {name} ({risk})")
+                low_lines.append(
+                    f"- {name} (Risk Level: {risk}) | "
+                    f"Threat Mag: {f.get('tctr_magnitude_percent', 'N/A')}% | "
+                    f"Intelligence: {f.get('intelligence_breakdown', 'N/A')}"
+                )
                 seen_names.add(name)
         low_block = "\n".join(low_lines)
     else:
@@ -1138,6 +1165,7 @@ No High but Medium exists → At Risk path. Neither → Secure path.
 ================================================================================
 Target URL         : {target_url}
 Scan Date          : {generated_at}
+Risk Magnitude     : {risk_magnitude}
 Tool               : {tool}
 Endpoints Tested   : {endpoints_tested}
 Authenticated Scan : {authenticated_scan}
@@ -1244,7 +1272,9 @@ def _format_sslscan_summary_prompt(parsed_data: Dict[str, Any]) -> str:
             vuln_lines.append(f"--- VULNERABILITY #{i} ---")
             vuln_lines.append(f"Name        : {v.get('name', 'N/A')}")
             vuln_lines.append(f"Severity    : {v.get('severity', 'N/A')}")
-            vuln_lines.append(f"Description : {v.get('description', 'N/A')}\n")
+            vuln_lines.append(f"Description : {v.get('description', 'N/A')}")
+            vuln_lines.append(f"Threat Mag  : {v.get('tctr_magnitude_percent', 'N/A')}%")
+            vuln_lines.append(f"Intelligence: {v.get('intelligence_breakdown', 'N/A')}\n")
         vuln_block = "\n".join(vuln_lines)
     else:
         vuln_block = "### High / Medium / Critical Vulnerabilities:\nNone detected."
@@ -1255,7 +1285,11 @@ def _format_sslscan_summary_prompt(parsed_data: Dict[str, Any]) -> str:
         for v in low_info_vulns:
             name = v.get("name", "N/A")
             if name not in seen_names:
-                low_lines.append(f"- {name} ({v.get('severity', 'N/A')})")
+                low_lines.append(
+                    f"- {name} (Severity: {v.get('severity', 'N/A')}) | "
+                    f"Threat Mag: {v.get('tctr_magnitude_percent', 'N/A')}% | "
+                    f"Intelligence: {v.get('intelligence_breakdown', 'N/A')}"
+                )
                 seen_names.add(name)
         low_vuln_block = "\n".join(low_lines)
     else:
@@ -1672,9 +1706,10 @@ def _format_sql_summary_prompt(parsed_data: Dict[str, Any]) -> str:
     fingerprint = parsed_data.get("database_fingerprint", {})
     vulns       = parsed_data.get("vulnerabilities", [])
 
-    target_url  = meta.get("target_url", "Unknown")
-    scan_date   = meta.get("scan_date", "Unknown")
-    db_status   = meta.get("database_status", "Unknown")
+    target_url      = meta.get("target_url", "Unknown")
+    scan_date       = meta.get("scan_date", "Unknown")
+    db_status       = meta.get("audit_status", "Unknown")
+    ml_threat_index = meta.get("ml_threat_index", "N/A")
 
     vuln_count       = counts.get("vulnerabilities_found", 0)
     injection_types  = counts.get("injection_types_count", 0)
@@ -2083,6 +2118,7 @@ Rules for the Decision Guide:
 ================================================================================
 Target URL         : {target_url}
 Scan Date          : {scan_date}
+ML Threat Index    : {ml_threat_index}
 Database Status    : {db_status}
 Total Vulns Found  : {vuln_count}
 Injection Types    : {injection_types}
@@ -2130,17 +2166,32 @@ def _format_killchain_summary_prompt(parsed_data: Dict[str, Any]) -> str:
     target    = meta.get("target", "Unknown")
     scan_date = meta.get("scan_date", "Unknown")
     profile   = meta.get("profile", "Full Audit")
+    aggression = meta.get("aggression", "N/A")
 
     critical_count = risks.get("critical", 0)
     high_count     = risks.get("high", 0)
     medium_count   = risks.get("medium", 0)
     total_count    = risks.get("total", 0)
 
-    target_ip        = recon.get("target_ip", "Unknown")
-    recon_status     = recon.get("status", "Unknown")
-    open_ports       = recon.get("open_ports", [])
+    # Phase 1: Recon
+    recon_ip        = recon.get("target_ip", "Unknown")
     subdomains_count = recon.get("subdomains_count", 0)
-    urls_count       = recon.get("urls_count", 0)
+    server_tech     = recon.get("server", "Unknown")
+
+    # Phase 2: Network
+    net_audit   = phases.get("network_audit", {})
+    net_status  = net_audit.get("status", "Unknown")
+    os_finger   = net_audit.get("os", "N/A")
+    open_ports  = net_audit.get("open_ports", [])
+
+    # Phase 3: Web
+    web_audit   = phases.get("web_audit", {})
+    waf_status  = web_audit.get("waf", "None Detected")
+    surface_area = web_audit.get("surface", "N/A")
+
+    # Phase 4: Traffic
+    traffic_audit = phases.get("traffic_audit", {})
+    packets_captured = traffic_audit.get("packets", 0)
 
     # --- 2. Priority-Sort Vulnerabilities: CRITICAL → HIGH → MEDIUM → LOW ---
     severity_order = {"CRITICAL": 0, "HIGH": 1, "MEDIUM": 2, "LOW": 3}
@@ -2154,7 +2205,6 @@ def _format_killchain_summary_prompt(parsed_data: Dict[str, Any]) -> str:
 
     # --- 3. Determine Kill Chain Breach Depth ---
     has_recon         = bool(open_ports or subdomains_count > 0)
-    has_weaponization = bool(tech)
     has_exploitation  = any(
         v.get("severity", "").upper() in ["CRITICAL", "HIGH"]
         for v in vulns
@@ -2165,43 +2215,50 @@ def _format_killchain_summary_prompt(parsed_data: Dict[str, Any]) -> str:
         breach_depth = "FULL COMPROMISE RISK"
     elif has_exploitation:
         breach_depth = "EXPLOITATION POSSIBLE"
-    elif has_weaponization:
-        breach_depth = "ATTACK PREPARATION POSSIBLE"
     elif has_recon:
         breach_depth = "RECONNAISSANCE COMPLETE"
     else:
         breach_depth = "MINIMAL EXPOSURE"
         
     recon_status_str = "Complete" if has_recon else "Incomplete"
-    open_ports_count = len(open_ports)
 
-    # --- 4. Build Technology Stack Block ---
-    if tech:
-        tech_lines = ["### Phase 2 — Technology Stack:"]
-        for k, v in tech.items():
-            tech_lines.append(f"- {k.title()}: {v}")
-        tech_block = "\n".join(tech_lines)
-    else:
-        tech_block = "### Phase 2 — Technology Stack:\nNo technology fingerprinting data available."
+    # --- 4. Build Phase Blocks ---
+    phase_data = [
+        "### Phase 1 — Reconnaissance & Discovery:",
+        f"- Target IP      : {recon_ip}",
+        f"- Subdomains Found: {subdomains_count}",
+        f"- Technology Stack: {server_tech}",
+        "",
+        "### Phase 2 — Network Audit:",
+        f"- Host Status     : {net_status}",
+        f"- OS Fingerprint  : {os_finger}",
+        f"- Open Ports Discovered: {', '.join(open_ports) if open_ports else 'None'}",
+        "",
+        "### Phase 3 — Web Application Audit:",
+        f"- WAF Status      : {waf_status}",
+        f"- Attack Surface  : {surface_area}",
+        "",
+        "### Phase 4 — Traffic Analysis:",
+        f"- Packet Intelligence: {packets_captured} packets captured during audit"
+    ]
+    phased_block = "\n".join(phase_data)
 
     # --- 5. Build Vulnerabilities Block ---
     if top_vulns:
-        vuln_lines = ["### Phase 3 — Confirmed Vulnerabilities (Top Priority, Pre-Sorted):"]
+        vuln_lines = ["### Aggregated Security Findings (Pre-Sorted by Severity):"]
         for i, v in enumerate(top_vulns, 1):
-            desc = v.get("description", "")
-            if len(desc) > 200:
-                desc = desc[:197] + "..."
             vuln_lines.append(f"--- FINDING #{i} ---")
-            vuln_lines.append(f"Severity   : {v.get('severity', 'N/A')}")
             vuln_lines.append(f"Title      : {v.get('title', 'N/A')}")
+            vuln_lines.append(f"Severity   : {v.get('severity', 'N/A')}")
             vuln_lines.append(f"CWE        : {v.get('cwe', 'N/A')}")
-            vuln_lines.append(f"Evidence   : {v.get('evidence', 'N/A')}")
-            vuln_lines.append(f"Context    : {desc}\n")
+            vuln_lines.append(f"ML Score   : {v.get('ml_threat_score', 'N/A')}/10.0")
+            vuln_lines.append(f"Context    : {v.get('description', 'N/A')[:250]}...")
+            vuln_lines.append(f"Fix        : {v.get('remediation', 'N/A')}\n")
         vuln_block = "\n".join(vuln_lines)
     else:
         vuln_block = (
-            "### Phase 3 — Confirmed Vulnerabilities:\n"
-            "No Critical or High vulnerabilities detected."
+            "### Aggregated Security Findings:\n"
+            "No vulnerabilities detected."
         )
 
     # --- 6. Build Scan Coverage Disclaimer ---
@@ -2318,9 +2375,10 @@ exactly these two columns:
 | Audit Profile | {profile} |
 | Breach Depth | {breach_depth} |
 | Reconnaissance Status | {recon_status_str} |
-| Open Ports Discovered | {open_ports_count} |
-| Subdomains Discovered | {subdomains_count} |
-| URLs Discovered | {urls_count} |
+| Target IP | {recon_ip} |
+| Server Tech | {server_tech} |
+| Host Status | {net_status} |
+| WAF Status | {waf_status} |
 | Report Classification | Internal Use Only |
 | Prepared By | NetShieldAI Automated Security Analysis |
 
@@ -2607,21 +2665,16 @@ Rules for the Decision Guide:
 Target             : {target}
 Scan Date          : {scan_date}
 Audit Profile      : {profile}
-Scan Coverage      : {scan_coverage}
-Scan Limitations   : {scan_limitations}
+Aggression         : {aggression}
+Threat Resilience  : {breach_depth}
 
 ### Risk Dashboard:
 - Critical Findings : {critical_count}
 - High Findings     : {high_count}
 - Medium Findings   : {medium_count}
-- Total Findings    : {total_count}
+- Total Items       : {total_count}
 
-### Phase 1 — Reconnaissance:
-- Target IP         : {target_ip}
-- Status            : {recon_status}
-- Open Ports        : {ports_summary}
-- Subdomains Found  : {subdomains_count}
-- URLs Discovered   : {urls_count}
+{phased_block}
 
 {tech_block}
 
@@ -2630,7 +2683,6 @@ Scan Limitations   : {scan_limitations}
 ### Breach Depth Assessment (Pre-Computed):
 - Breach Depth      : {breach_depth}
 - Recon Complete    : {"Yes" if has_recon else "No"}
-- Weaponization Data: {"Yes" if has_weaponization else "No"}
 - Exploitation Found: {"Yes" if has_exploitation else "No"}
 - Critical Confirmed: {"Yes" if has_critical else "No"}
 ================================================================================
@@ -2656,26 +2708,26 @@ def _format_api_scan_summary_prompt(parsed_data: Dict[str, Any]) -> str:
     """
 
     # --- 1. Extract Core Data ---
-    summary    = parsed_data.get("summary", parsed_data.get("alert_summary", {}))
-    findings   = parsed_data.get("findings", [])
-    target_url = parsed_data.get("target_url", "N/A")
-    scan_date  = parsed_data.get("scan_date", "N/A")
+    meta = parsed_data.get("metadata", {})
+    summary = parsed_data.get("summary", {})
+    findings = parsed_data.get("findings", [])
+    target_url = meta.get("target_url", "N/A")
+    scan_date = meta.get("scan_date", "N/A")
 
     high_count   = summary.get("High", 0)
     medium_count = summary.get("Medium", 0)
     low_count    = summary.get("Low", 0)
-    info_count   = summary.get("Info", 0)
     total_count  = summary.get("Total", 0)
     
-    total_endpoints_assessed = summary.get("total_endpoints_assessed", "Unknown")
-    authentication_coverage  = summary.get("authentication_coverage", "Unknown")
+    audited = summary.get("audited", "Unknown")
+    critical_endpoints = summary.get("critical_endpoints", "Unknown")
 
     # --- 2. Priority-Sort Findings: CRITICAL → HIGH → MEDIUM → LOW ---
     severity_order = {"CRITICAL": 0, "HIGH": 1, "MEDIUM": 2, "LOW": 3, "INFO": 4}
     sorted_findings = sorted(
         findings,
         key=lambda f: severity_order.get(
-            (f.get("risk") or f.get("risk_level", "")).upper(), 99
+            (f.get("risk_level", "")).upper(), 99
         )
     )
     # Cap at 15 to avoid token overflow
@@ -2713,14 +2765,14 @@ def _format_api_scan_summary_prompt(parsed_data: Dict[str, Any]) -> str:
             break
 
     # --- 4. TCTR Score Interpreter ---
-    def interpret_tctr(score) -> str:
+    def interpret_tctr_magnitude(magnitude: str) -> str:
         try:
-            score_val = float(score)
-            if score_val >= 8.0:
-                return "Critical — immediate attention required"
-            elif score_val >= 6.0:
+            val = float(magnitude.replace('%', ''))
+            if val >= 80:
+                return "Critical — immediate remediation required"
+            elif val >= 60:
                 return "High — address this sprint"
-            elif score_val >= 4.0:
+            elif val >= 30:
                 return "Medium — address this quarter"
             else:
                 return "Low — monitor and review"
@@ -2732,24 +2784,22 @@ def _format_api_scan_summary_prompt(parsed_data: Dict[str, Any]) -> str:
         finding_lines = ["### API Endpoint Findings (Pre-Sorted by Severity):"]
         for i, f in enumerate(top_findings, 1):
             method      = f.get("method", "GET")
-            risk        = f.get("risk") or f.get("risk_level", "N/A")
-            tctr        = f.get("tctr_priority", "N/A")
-            base_score  = f.get("base_score", "N/A")
+            risk        = f.get("risk_level", "N/A")
+            tctr        = f.get("tctr_magnitude", "N/A")
+            priority    = f.get("priority", "N/A")
             description = f.get("description", "N/A")
-            solution    = f.get("solution", "N/A")
-            justification = f.get("risk_justification", "N/A")
+            ai_breakdown = f.get("ai_breakdown", "N/A")
 
             finding_lines.append(f"--- FINDING #{i} ---")
             finding_lines.append(f"Name            : {f.get('name', 'N/A')}")
             finding_lines.append(f"Risk Level      : {risk}")
-            finding_lines.append(f"Priority Level  : {f.get('priority_level', 'N/A')}")
+            finding_lines.append(f"Priority        : {priority}")
             finding_lines.append(f"Endpoint        : [{method}] {f.get('url', 'N/A')}")
             finding_lines.append(f"Method Risk Flag: {get_method_flag(method)}")
-            finding_lines.append(f"TCTR Score      : {tctr} → {interpret_tctr(tctr)}")
-            finding_lines.append(f"Base Score      : {base_score}")
-            finding_lines.append(f"Description     : {description}")
-            finding_lines.append(f"Solution Hint   : {solution}")
-            finding_lines.append(f"Justification   : {justification}\n")
+            finding_lines.append(f"TCTR Magnitude  : {tctr} → {interpret_tctr_magnitude(tctr)}")
+            finding_lines.append(f"AI Breakdown    : {ai_breakdown}")
+            finding_lines.append(f"CWE Mapping     : {f.get('cwe', 'N/A')}")
+            finding_lines.append(f"Technical Meta  : {description[:500]}...\n")
         findings_block = "\n".join(finding_lines)
     else:
         findings_block = "### API Endpoint Findings:\nNo findings detected."
@@ -2857,12 +2907,12 @@ Before the verdict paragraph, produce a Markdown metadata table with
 exactly these two columns:
 | Field | Value |
 |---|---|
-| Report Generated By | NetShieldAI API Scanner |
-| Scan Target | {target_url} |
-| Scan Date | {scan_date} |
-| Total Endpoints Assessed | {total_endpoints_assessed} |
+| Report Generated By | NetShieldAI API Security Audit |
+| API Base URL | {target_url} |
+| Audit Date | {scan_date} |
+| Endpoints Audited | {audited} |
+| Critical / High Vulnerabilities | {high_count} |
 | Highest Risk HTTP Method | {highest_risk_method} |
-| Authentication Coverage | {authentication_coverage} |
 | Report Classification | Internal Use Only |
 | Prepared By | NetShieldAI Automated Security Analysis |
 
@@ -3107,15 +3157,14 @@ Rules for the Decision Guide:
 ================================================================================
 Target URL         : {target_url}
 Scan Date          : {scan_date}
-Scan Coverage      : {scan_coverage}
-Scan Limitations   : {scan_limitations}
+Endpoints Audited  : {audited}
+Critical Endpoints : {critical_endpoints}
 
 ### Risk Summary:
-- High            : {high_count}
-- Medium          : {medium_count}
-- Low             : {low_count}
-- Info            : {info_count}
-- Total Findings  : {total_count}
+- Critical Findings : {high_count}
+- Medium Findings   : {medium_count}
+- Low / Info Findings: {low_count}
+- Total Findings    : {total_count}
 
 {findings_block}
 ================================================================================
@@ -3220,6 +3269,7 @@ def _format_semgrep_summary_prompt(parsed_data: Dict[str, Any]) -> str:
             finding_lines.append(f"Severity         : {severity}")
             finding_lines.append(f"Location         : {file_loc} — Line {line_no}")
             finding_lines.append(f"Description      : {description}")
+            finding_lines.append(f"Vulnerable Code  : {f.get('vulnerable_code', 'N/A')}")
             finding_lines.append(f"Suggested Fix    : {suggested}\n")
         findings_block = "\n".join(finding_lines)
     else:

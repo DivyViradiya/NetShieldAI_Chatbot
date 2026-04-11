@@ -31,7 +31,8 @@ def parse_pcap_report(raw_text: str) -> Dict[str, Any]:
             "report_type": "Network Traffic Analysis",
             "target_node": None,
             "capture_timestamp": None,
-            "engine_version": None
+            "engine_version": None,
+            "anomalies_detected": "Unknown"
         },
         "traffic_metrics": {
             "total_packets": 0,
@@ -46,33 +47,41 @@ def parse_pcap_report(raw_text: str) -> Dict[str, Any]:
     }
 
     # --- METADATA ---
-    target_match = re.search(r"TARGET NODE\s*([\d\.]+)", raw_text)
+    target_match = re.search(r"(?:TARGET NODE|TARGET NODE\n|TARGET IP\n)\s*([\d\.]+)", raw_text)
     if target_match: report["scan_metadata"]["target_node"] = target_match.group(1)
 
-    ts_match = re.search(r"CAPTURE TIMESTAMP\s*([\d-]{10}T[\d:\.]+\+\s*[\d:]+)", raw_text, re.DOTALL)
+    ts_match = re.search(r"(?:CAPTURE TIMESTAMP|CAPTURE DATE)\s*([\d-]{10}T[\d:\.\+\-\s]+?)(?:ENGINE|DATA|\nTOTAL|\n\n|$)", raw_text, re.DOTALL)
     if ts_match: report["scan_metadata"]["capture_timestamp"] = ts_match.group(1).replace('\n', '')
 
     ver_match = re.search(r"ENGINE VERSION\s*(.*)", raw_text)
     if ver_match: report["scan_metadata"]["engine_version"] = ver_match.group(1).strip()
 
+    anomal_match = re.search(r"ANOMALIES DETECTED\s*(.*?)\s*\n", raw_text)
+    if anomal_match: report["scan_metadata"]["anomalies_detected"] = anomal_match.group(1).strip()
+
     # --- TRAFFIC METRICS (FIXED) ---
-    pkts_match = re.search(r"TOTAL PACKETS\s*(\d+)", raw_text)
+    pkts_match = re.search(r"TOTAL\s+PACKETS\s*(\d+)", raw_text)
     if pkts_match: report["traffic_metrics"]["total_packets"] = int(pkts_match.group(1))
 
     # FIX: Regex now explicitly looks for specific units (B, KB, MB, GB) to avoid grabbing "DURATION"
-    vol_match = re.search(r"DATA VOLUME\s*([\d\.]+\s*(?:B|KB|MB|GB|TB))", raw_text, re.IGNORECASE)
+    vol_match = re.search(r"DATA\s+VOLUME\s*([\d\.]+)\s*(B|KB|MB|GB|TB)", raw_text, re.IGNORECASE)
     if vol_match:
-        report["traffic_metrics"]["data_volume"] = vol_match.group(1).upper()
+        report["traffic_metrics"]["data_volume"] = f"{vol_match.group(1)} {vol_match.group(2).upper()}"
 
     dur_match = re.search(r"DURATION\s*([\d\.]+)s", raw_text)
     if dur_match: report["traffic_metrics"]["duration_sec"] = float(dur_match.group(1))
 
-    thru_match = re.search(r"THROUGHPUT\s*([\d\.]+\s*[A-Za-z]+)", raw_text)
+    thru_match = re.search(r"(?:THROUGHPUT|AVG THROUGHPUT)\s*([\d\.]+\s*(?:bps|kbps|mbps|gbps|Bps|KBps|MBps))", raw_text, re.IGNORECASE)
     if thru_match: report["traffic_metrics"]["throughput"] = thru_match.group(1)
 
     # --- PROTOCOL HIERARCHY ---
     proto_start = raw_text.find("PROTOCOL LAYER FRAME COUNT BYTES")
+    if proto_start == -1:
+        proto_start = raw_text.find("PROTOCOL DISTRIBUTION")
+
     proto_end = raw_text.find("ACTIVE CONVERSATIONS")
+    if proto_end == -1:
+        proto_end = raw_text.find("NETSHIELDAI REPORTING ENGINE")
     
     if proto_start != -1:
         proto_section = raw_text[proto_start:proto_end] if proto_end != -1 else raw_text[proto_start:]
@@ -104,22 +113,40 @@ def parse_pcap_report(raw_text: str) -> Dict[str, Any]:
 
     # --- PACKET INSPECTION SAMPLE ---
     packet_start = raw_text.find("TIME SOURCE DESTINATION PROTOCOL LEN")
+    if packet_start == -1:
+        packet_start = raw_text.find("TRAFFIC INTELLIGENCE (PACKET INSPECTION)")
+
     if packet_start != -1:
         packet_section = raw_text[packet_start:]
-        # Regex: Time (ends in s) Space IP Space IP Space Proto Space Len
-        pkt_pattern = re.compile(r"([\d\.]+)s\s+([\d\.]+)\s+([\d\.]+)\s+([A-Za-z0-9]+)\s+(\d+)")
+        # Regex: Time Space IP Space IP Space Proto Space Len (Optional Length) + trailing body
+        pkt_pattern = re.compile(
+            r"(?:\[([\d\.]+)s\]|([\d\.]+)s)\s+([\w\.:]+)\s*(?:→|->|<->|↔)?\s*([\w\.:]+)\s+([A-Za-z0-9_]+)(?:\s+(\d+))?"
+            r"((?:\n|.)*?)"
+            r"(?=(?:\[[\d\.]+s\]|[\d\.]+s)\s+[\w\.:]+|\nPROTOCOL|\nNetShield|\Z)"
+        )
         
         for match in pkt_pattern.finditer(packet_section):
+            time_str = match.group(1) or match.group(2)
+            body = match.group(7)
+            
+            tctr_mag_match = re.search(r"TCTR MAGNITUDE.*?\n([\d\.]+)%", body, re.IGNORECASE)
+            tctr_magnitude = float(tctr_mag_match.group(1)) if tctr_mag_match else None
+            
+            intel_match = re.search(r"%\s*\n(.*?)(?=\n\[ TCTR|\Z)", body, re.IGNORECASE | re.DOTALL)
+            intelligence = intel_match.group(1).replace('\n', ' ').strip() if intel_match else None
+
             report["packet_sample"].append({
-                "time_offset": float(match.group(1)),
-                "source": match.group(2),
-                "destination": match.group(3),
-                "protocol": match.group(4),
-                "length": int(match.group(5))
+                "time_offset": float(time_str) if time_str else 0.0,
+                "source": match.group(3),
+                "destination": match.group(4),
+                "protocol": match.group(5),
+                "length": int(match.group(6)) if match.group(6) else 0,
+                "tctr_magnitude_percent": tctr_magnitude,
+                "intelligence_breakdown": intelligence
             })
 
     # --- SECURITY INSIGHTS ---
-    insight_match = re.search(r"Analysis Summary:\s*(.*?)(?=\nPage|\Z)", raw_text, re.DOTALL)
+    insight_match = re.search(r"(?:Analysis Summary:|Anomaly Analysis Summary\b[^\n]*\n)\s*(.*?)(?=\nPage|\nNetShield|\[ TCTR|\Z)", raw_text, re.DOTALL)
     if insight_match:
         report["security_insights"] = insight_match.group(1).strip()
 

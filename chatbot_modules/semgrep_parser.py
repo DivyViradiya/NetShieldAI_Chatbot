@@ -21,10 +21,11 @@ def clean_raw_text(text: str) -> str:
     Cleans Semgrep PDF text artifacts.
     """
     text = re.sub(r'\r\n|\r', '\n', text)
-    text = re.sub(r'Page \d+ of \d+', '', text)
-    # Remove footer
-    text = re.sub(r'NETSHIELDAI REPORTING ENGINE.*?CONFIDENTIAL', '\n', text, flags=re.DOTALL)
-    return text
+    # Remove footer/header artifacts
+    text = re.sub(r'NetShieldAI Security Report \| Page \d+ of \d+', '', text)
+    text = re.sub(r'NETSHIELDAI REPORTING ENGINE // SAST MODULE // GENERATED.*?\n', '\n', text, flags=re.IGNORECASE)
+    text = re.sub(r'// SAST REPORT.*?SEMGREP', '', text, flags=re.IGNORECASE)
+    return text.strip()
 
 def safe_extract(pattern: str, text: str, default: Any = "N/A", group: int = 1, flags: int = 0) -> Any:
     """
@@ -49,16 +50,19 @@ def extract_summary_stats(clean_text: str) -> Dict[str, int]:
     }
 
     # Extract TOTAL FINDINGS
-    total_str = safe_extract(r"TOTAL FINDINGS\s*(\d+)", clean_text, "0")
-    stats["Total"] = int(total_str)
+    total_match = re.search(r"TOTAL FINDINGS\s*(\d+)", clean_text, re.IGNORECASE)
+    if total_match:
+        stats["Total"] = int(total_match.group(1))
 
     # Extract HIGH RISK (ERRORS)
-    error_str = safe_extract(r"HIGH RISK \(ERRORS\)\s*(\d+)", clean_text, "0")
-    stats["Error"] = int(error_str)
+    error_match = re.search(r"HIGH RISK \(ERRORS\)\s*(\d+)", clean_text, re.IGNORECASE)
+    if error_match:
+        stats["Error"] = int(error_match.group(1))
 
     # Extract MEDIUM RISK (WARNINGS)
-    warning_str = safe_extract(r"MEDIUM RISK \(WARNINGS\)\s*(\d+)", clean_text, "0")
-    stats["Warning"] = int(warning_str)
+    warning_match = re.search(r"MEDIUM RISK \(WARNINGS\)\s*(\d+)", clean_text, re.IGNORECASE)
+    if warning_match:
+        stats["Warning"] = int(warning_match.group(1))
     
     return stats
 
@@ -71,46 +75,32 @@ def parse_semgrep_report(raw_text: str) -> Dict[str, Any]:
     findings_list = []
 
     # --- STEP 2: Findings ---
-    finding_markers = list(re.finditer(r"\s+(ERROR|WARNING)\s*\n", clean_text))
+    # Pattern: [RuleName][ERROR|WARNING] \n File [Path] Line [Num] \n ANALYSIS MESSAGE...
+    finding_pattern = re.compile(
+        r'(?P<rule>.*?)(?P<tag>ERROR|WARNING)\s*\n'
+        r'File\s+(?P<file>[^\n]+)\s+Line\s+(?P<line>\d+)\s*\n'
+        r'ANALYSIS MESSAGE\s*(?P<msg>.*?)\s*'
+        r'VULNERABLE CODE SEGMENT\s*(?P<code>.*?)(?=\n.*?(?:ERROR|WARNING)\s*\n|NetShieldAI|$)',
+        re.DOTALL | re.IGNORECASE
+    )
     
-    for i, marker in enumerate(finding_markers):
-        tag = marker.group(1)
-        start_search = marker.start()
+    for match in finding_pattern.finditer(clean_text):
+        rule_name = match.group("rule").strip()
+        # Clean rule name if it has leftovers from a previous section
+        if "DETAILED FINDINGS" in rule_name:
+            rule_name = rule_name.split("DETAILED FINDINGS")[-1].strip()
         
-        if i + 1 < len(finding_markers):
-            end_search = finding_markers[i+1].start()
-        else:
-            end_search = len(clean_text)
-
-        # Body text between tags
-        body = clean_text[marker.end():end_search]
-        
-        # Pre-text (to find the rule name)
-        pre_text = clean_text[max(0, start_search-200):start_search]
-        lines_pre = [l.strip() for l in pre_text.split('\n') if l.strip()]
-        rule_name = lines_pre[-1] if lines_pre else "Unknown Rule"
-
-        # Extract File and Line
-        file_path = safe_extract(r"FILE\s+(.*?)\s+LINE\s+(\d+)", body, "Unknown", group=1)
-        line_num = safe_extract(r"FILE\s+(.*?)\s+LINE\s+(\d+)", body, "N/A", group=2)
-
-        # Extract Description
-        description = safe_extract(r"DESCRIPTION:\s*(.*?)(VULNERABLE CODE:|SUGGESTED FIX:|Page \d+|$)", body, "", flags=re.DOTALL)
-
-        # Extract Vulnerable Code
-        vulnerable_code = safe_extract(r"VULNERABLE CODE:\s*(.*?)(SUGGESTED FIX:|Page \d+|$)", body, "", flags=re.DOTALL)
-
-        # Extract Suggested Fix
-        suggested_fix = safe_extract(r"SUGGESTED FIX:\s*(.*?)(Page \d+|$)", body, "", flags=re.DOTALL)
+        # Remove common artifacts like page numbers if they got caught
+        rule_name = re.sub(r'NetShieldAI Security Report \| Page \d+ of \d+', '', rule_name).strip()
 
         findings_list.append({
             "rule": rule_name,
-            "severity": tag,
-            "file": file_path,
-            "line": line_num,
-            "description": description,
-            "vulnerable_code": vulnerable_code,
-            "suggested_fix": suggested_fix
+            "severity": match.group("tag").upper(),
+            "file": match.group("file").strip(),
+            "line": match.group("line").strip(),
+            "description": match.group("msg").strip(),
+            "vulnerable_code": match.group("code").strip(),
+            "suggested_fix": "Review the code segment for security best practices and apply automated remediation where possible."
         })
 
     report = {

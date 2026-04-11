@@ -24,197 +24,124 @@ def clean_raw_text(text: str) -> str:
     text = re.sub(r'\r\n|\r', '\n', text)
     text = re.sub(r'Page \d+ of \d+', '', text)
     
-    # 1. Remove the footer that jams into titles
-    text = re.sub(r'NETSHIELDAI.*?GENERATED \d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}', '\n', text, flags=re.DOTALL)
+    # Remove footers and standard noise
+    text = re.sub(r'NETSHIELDAI REPORTING ENGINE.*?V\d+\.\d+ // GENERATED.*?\n', '\n', text, flags=re.DOTALL)
+    text = re.sub(r'NetShieldAI Security Report \| Page \d+ of \d+', '\n', text)
     
-    # 2. Fix "Jammed" Risk Levels (e.g., "15HIGH" -> "15 HIGH")
-    text = re.sub(r'([a-z0-9)])(HIGH|MEDIUM|LOW|INFO)', r'\1 \2', text)
-    
-    # 3. Fix "Jammed" URL/Score fields
-    text = re.sub(r'([\d\w])(TARGET URL)', r'\1 \2', text)
-    
-    # 4. Ensure RISK is separated
-    text = re.sub(r'([^\s])(HIGH|MEDIUM|LOW|INFO) RISK', r'\1 \2 RISK', text)
+    # Fix "Jammed" labels
+    text = re.sub(r'([a-z0-9)])(HIGH|MEDIUM|LOW|INFO) RISK', r'\1 \2 RISK', text)
+    text = re.sub(r'([^\s])(HTTP METHOD|PREDICTED RISK|PRIORITY LEVEL|CWE MAPPING|TARGET ENDPOINT URL)', r'\1 \2', text)
 
     return text
 
 def safe_extract(pattern: str, text: str, default: Any = "N/A", group: int = 1, flags: int = 0) -> Any:
-    """
-    Safely attempts to extract a pattern from text.
-    Logs a warning if the extraction fails.
-    """
+    """ Safely extraction with regex """
     try:
         match = re.search(pattern, text, flags)
         if match:
             return match.group(group).strip()
     except Exception as e:
-        logger.warning(f"Regex extraction error for pattern '{pattern}': {e}")
+        logger.warning(f"Regex extraction error: {e}")
     return default
 
-def extract_summary_stats(clean_text: str) -> Dict[str, int]:
-    """
-    Extracts the counts directly from the EXECUTIVE SUMMARY section.
-    """
+def extract_summary_stats(clean_text: str) -> Dict[str, Any]:
+    """ Extracts stats from the new header format """
     stats = {
         "High": 0,
         "Medium": 0,
         "Low": 0,
         "Info": 0,
-        "Total": 0
+        "Total": 0,
+        "audited": 0,
+        "critical_endpoints": 0
     }
 
-    # 1. Extract TOTAL
-    total_str = safe_extract(r"TOTAL ALERTS\s*(\d+)", clean_text, "0")
-    stats["Total"] = int(total_str)
-
-    # 2. Extract HIGH
-    high_str = safe_extract(r"(\d+)\s*HIGH RISK", clean_text, "0")
-    stats["High"] = int(high_str)
-
-    # 3. Extract MEDIUM
-    med_str = safe_extract(r"(\d+)\s*MEDIUM RISK", clean_text, "0")
-    stats["Medium"] = int(med_str)
-
-    # 4. Extract LOW / INFO
-    low_info_str = safe_extract(r"(\d+)\s*LOW\s*/\s*INFO", clean_text, "0")
-    stats["Low"] = int(low_info_str)
+    # Extract based on new labels
+    stats["Total"] = int(safe_extract(r"TOTAL FINDINGS\s*(\d+)", clean_text, "0"))
+    stats["High"] = int(safe_extract(r"CRITICAL / HIGH\s*(\d+)", clean_text, "0"))
+    stats["Medium"] = int(safe_extract(r"MEDIUM RISK\s*(\d+)", clean_text, "0"))
+    stats["Low"] = int(safe_extract(r"LOW / INFO\s*(\d+)", clean_text, "0"))
+    
+    stats["audited"] = int(safe_extract(r"(\d+)\s*AUDITED", clean_text, "0"))
+    stats["critical_endpoints"] = int(safe_extract(r"CRITICAL ENDPOINTS\s*(\d+)", clean_text, "0"))
     
     return stats
 
 def parse_api_scan_report(raw_text: str) -> Dict[str, Any]:
     clean_text = clean_raw_text(raw_text)
     
-    # --- STEP 1: Extract Stats from Header ---
+    # --- STEP 1: Metadata ---
+    base_url = safe_extract(r"API BASE URL\s*(.*?)(?:AUDIT DATE|$)", clean_text, "Unknown").replace('\n', '').strip()
+    scan_date = safe_extract(r"AUDIT DATE\s*(\d{4}-\d{2}-\d{2})", clean_text, "N/A")
+    
     header_stats = extract_summary_stats(clean_text)
     
     findings_list = []
 
-    # --- STEP 2: Parse Individual Findings ---
-    # Findings usually start with a title followed by risk level and then CONFIDENCE
-    confidence_markers = list(re.finditer(r"\nCONFIDENCE\s", clean_text))
-    
-    for i, marker in enumerate(confidence_markers):
-        current_conf_start = marker.start()
-        
-        if i + 1 < len(confidence_markers):
-            next_conf_start = confidence_markers[i+1].start()
-            search_limit = next_conf_start
-        else:
-            search_limit = len(clean_text)
+    # --- STEP 2: Findings ---
+    # Split by ENDPOINT_IDENT marker
+    finding_chunks = re.split(r"ENDPOINT_IDENT:", clean_text)[1:]
 
-        # Backwards Search for Title
-        pre_text_chunk = clean_text[max(0, current_conf_start-600):current_conf_start]
-        lines = pre_text_chunk.split('\n')
-        
-        vuln_name = "Unknown Vulnerability"
-        risk_level = "Unknown"
-        
-        for line in reversed(lines):
-            line = line.strip()
-            if not line: continue
-            
-            risk_match = re.search(r"(.*)\s+(HIGH|MEDIUM|LOW|INFO)\s+RISK$", line, re.IGNORECASE)
-            
-            if risk_match:
-                possible_name = risk_match.group(1).strip()
-                if len(possible_name) < 150:
-                    vuln_name = possible_name
-                    risk_level = risk_match.group(2).upper()
-                    break
-            
-            if "REFERENCES" in line or "REMEDIATION SOLUTION" in line:
-                break
+    for chunk in finding_chunks:
+        # Title and Risk are often on the first line after the marker
+        header_line = chunk.split('\n')[0].strip()
+        # Format: METHOD → Title
+        header_match = re.search(r"([A-Z]+)\s*→\s*(.*?)$", header_line)
+        method = header_match.group(1) if header_match else "GET"
+        title = header_match.group(2).strip() if header_match else "Unknown Vulnerability"
 
-        # Forwards Search for Body
-        body_text = clean_text[marker.end():search_limit]
-        
-        confidence = safe_extract(r"^\s*([A-Za-z]+)", body_text, "Unknown")
-        score = safe_extract(r"PREDICTED SCORE\s*([\d\.]+|N/A|Unprofiled)", body_text, "N/A")
-        url = safe_extract(r"TARGET URL\s*(.*?)DESCRIPTION", body_text, "Unknown", flags=re.DOTALL).replace('\n', '').replace(' ', '')
-        description = safe_extract(r"DESCRIPTION(.*?)(REMEDIATION SOLUTION|SOLUTION)", body_text, "", flags=re.DOTALL)
-        solution = safe_extract(r"(REMEDIATION SOLUTION|SOLUTION)(.*?)REFERENCES", body_text, "", group=2, flags=re.DOTALL)
+        # Risk level is usually jammed or right after the title in the chunk
+        risk_match = re.search(r"(HIGH|MEDIUM|LOW|INFORMATIONAL)\s*RISK", chunk, re.IGNORECASE)
+        risk_level = risk_match.group(1).upper() if risk_match else "UNKNOWN"
+        if risk_level == "INFORMATIONAL": risk_level = "INFO"
 
-        refs = []
-        ref_content = safe_extract(r"REFERENCES(.*)", body_text, "", flags=re.DOTALL)
-        if ref_content:
-            lines_ref = ref_content.split('\n')
-            for line in lines_ref:
-                line = line.strip()
-                if not line: continue
-                if re.search(r"(HIGH|MEDIUM|LOW|INFO)\s+RISK$", line):
-                    break
-                if "http" in line or "owasp" in line.lower() or "cwe" in line.lower():
-                    refs.append(line)
-
-        findings_list.append({
-            "name": vuln_name,
+        finding = {
+            "name": title,
+            "method": method,
             "risk_level": risk_level,
-            "confidence": confidence,
-            "predicted_score": score,
-            "url": url,
-            "description": description,
-            "solution": solution,
-            "references": refs
-        })
+            "predicted_risk": safe_extract(r"PREDICTED RISK\s*([\d\.]+)", chunk, "0.0"),
+            "priority": safe_extract(r"PRIORITY LEVEL\s*(P\d+ \(.*?\))", chunk, "N/A"),
+            "cwe": safe_extract(r"CWE MAPPING\s*(CWE-\d+|N/A)", chunk, "N/A"),
+            "url": safe_extract(r"TARGET ENDPOINT URL\s*(.*?)(?:VULNERABILITY INTELLIGENCE|$)", chunk, "N/A", flags=re.DOTALL).replace('\n', '').strip(),
+            "description": safe_extract(r"VULNERABILITY INTELLIGENCE\s*(.*?)(?:TCTR THREAT MAGNITUDE|$)", chunk, "N/A", flags=re.DOTALL).strip(),
+            "tctr_magnitude": safe_extract(r"TCTR THREAT MAGNITUDE \(API_ENRICHED\)\s*([\d\.]+(?:%)?)", chunk, "0%"),
+            "ai_breakdown": safe_extract(r"AI Intelligence Breakdown:\s*(.*?)(?=\[ TCTR\.AI_ENGINE|$)", chunk, "N/A", flags=re.DOTALL).strip()
+        }
+        
+        # Clean up URL (sometimes has trailing text from jamming)
+        if finding["url"]:
+            finding["url"] = finding["url"].split(" ")[0].strip()
 
-    # --- STEP 3: Reconcile Stats ---
-    final_stats = {
-        "High": 0,
-        "Medium": 0,
-        "Low": 0,
-        "Info": 0,
-        "Total": header_stats["Total"] if header_stats["Total"] > 0 else 0
-    }
-
-    # Count breakdown from findings
-    for finding in findings_list:
-        if final_stats["Total"] == 0:
-             final_stats["Total"] += 1
-
-        r_level = finding['risk_level'].title()
-        if r_level in final_stats:
-            final_stats[r_level] += 1
+        findings_list.append(finding)
 
     report = {
-        "scan_metadata": {
-            "tool": "API Scanner",
-            "report_id": str(uuid.uuid4()),
-            "generated_at": datetime.now().isoformat(),
-            "target_url": findings_list[0]['url'] if findings_list else "Unknown_URL"
+        "metadata": {
+            "tool": "API Security Audit",
+            "target_url": base_url,
+            "scan_date": scan_date,
+            "report_id": str(uuid.uuid4())
         },
-        "alert_summary": final_stats,
+        "summary": header_stats,
         "findings": findings_list
     }
 
     return report
 
 def process_api_scan_report_file(file_path: str) -> Dict[str, Any]:
-    """
-    Orchestrates reading the PDF, extracting text, and parsing the API Scanner data.
-    """
     if not os.path.exists(file_path):
-        raise FileNotFoundError(f"API scan report not found: {file_path}")
+        raise FileNotFoundError(f"API report not found: {file_path}")
     
-    logger.info(f"Processing API scan report: {file_path}")
     try:
         raw_text = extract_text_from_pdf(file_path)
-        
         if not raw_text.strip():
-            raise ValueError("Extracted text from file is empty.")
+            raise ValueError("No text extracted from PDF.")
             
         report_data = parse_api_scan_report(raw_text)
-        
         report_data["file_metadata"] = {
             "filename": os.path.basename(file_path),
-            "file_size": os.path.getsize(file_path),
-            "last_modified": datetime.fromtimestamp(os.path.getmtime(file_path)).isoformat()
+            "file_size": os.path.getsize(file_path)
         }
         return report_data
-        
     except Exception as e:
-        logger.error(f"Error processing API scan report {file_path}: {e}")
+        logger.error(f"Error processing API report: {e}")
         raise
-
-if __name__ == "__main__":
-    # Test block can be added here if needed for debugging
-    pass

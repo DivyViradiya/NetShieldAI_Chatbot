@@ -77,21 +77,34 @@ def parse_sslscan_report(raw_text: str) -> Dict[str, Any]:
     }
 
     # --- 4. Extract Vulnerabilities ---
-    # Pattern: [Name] [Severity] \n DESCRIPTION [Text]
-    vuln_iter = re.finditer(
-        r'(?P<name>[^\n]+)\s+(?P<sev>MEDIUM|HIGH|LOW|CRITICAL)\s+SEVERITY\s+'
-        r'DESCRIPTION\s+(?P<desc>[^\n]+)', 
-        clean_text
+    # Pattern: [Name] [Severity] \n Description: [Text] \n TCTR THREAT MAGNITUDE...
+    vuln_pattern = re.compile(
+        r'(?P<name>[^\n]+?)\s+(?P<sev>MEDIUM|HIGH|LOW|CRITICAL|INFO)\s+SEVERITY\s*'
+        r'(?P<body>(?:(?!\n[^\n]+\s+(?:MEDIUM|HIGH|LOW|CRITICAL|INFO)\s+SEVERITY|\nSERVER CONFIGURATION|\Z).)+)',
+        re.IGNORECASE | re.DOTALL
     )
     
-    for v in vuln_iter:
+    for v in vuln_pattern.finditer(clean_text):
         if "VULNERABILITY FINDINGS" in v.group('name'):
             continue
             
+        body = v.group('body')
+        
+        desc_match = re.search(r'Description:\s*(.*?)(?=\s*TCTR THREAT MAGNITUDE|$)', body, re.IGNORECASE | re.DOTALL)
+        desc = desc_match.group(1).strip() if desc_match else ''
+        
+        tctr_mag_match = re.search(r'TCTR THREAT MAGNITUDE\s*([\d\.]+)%', body, re.IGNORECASE)
+        tctr = float(tctr_mag_match.group(1)) if tctr_mag_match else None
+        
+        intel_match = re.search(r'Intelligence Breakdown:\s*(.*?)(?:\[|\n|$)', body, re.IGNORECASE)
+        intel = intel_match.group(1).strip() if intel_match else None
+
         report_data["vulnerabilities"].append({
             "name": v.group('name').strip(),
             "severity": v.group('sev').strip(),
-            "description": v.group('desc').strip()
+            "description": desc,
+            "tctr_magnitude_percent": tctr,
+            "intelligence_breakdown": intel
         })
 
     # --- 5. Extract Protocols and Ciphers (State Machine Approach) ---

@@ -88,8 +88,20 @@ def extract_summary_stats(clean_text: str) -> Dict[str, int]:
 def parse_zap_report(raw_text: str) -> Dict[str, Any]:
     clean_text = clean_raw_text(raw_text)
     
-    # --- STEP 1: Extract Stats from Header ---
+    # --- STEP 1: Extract Stats & Metadata from Header ---
     header_stats = extract_summary_stats(clean_text)
+    
+    metadata = {}
+    
+    # Target URL (Handle potential line breaks)
+    target_match = re.search(r'TARGET SCOPE\s+(http[^\s]+)', clean_text.replace('\n', ' '), re.IGNORECASE)
+    if target_match:
+        metadata["target_url"] = target_match.group(1).strip()
+        
+    # Risk Magnitude
+    risk_mag_match = re.search(r'RISK MAGNITUDE\s*([A-Z]+)', clean_text, re.IGNORECASE)
+    if risk_mag_match:
+        metadata["risk_magnitude"] = risk_mag_match.group(1).strip()
     
     findings_list = []
 
@@ -134,22 +146,22 @@ def parse_zap_report(raw_text: str) -> Dict[str, Any]:
         conf_match = re.match(r"\s*([A-Za-z]+)", body_text)
         confidence = conf_match.group(1) if conf_match else "Unknown"
 
-        score_match = re.search(r"PREDICTED SCORE\s*([\d\.]+|N/A)", body_text)
+        score_match = re.search(r"(?:PREDICTED SCORE|BASE SCORE)\s*([\d\.]+|N/A)", body_text)
         score = score_match.group(1) if score_match else "N/A"
 
-        url_match = re.search(r"TARGET URL\s*(.*?)DESCRIPTION", body_text, re.DOTALL)
+        url_match = re.search(r"(?:TARGET URL|TARGET ARCHITECTURE AFFECTED)\s*(.*?)(?:DESCRIPTION|VULNERABILITY INTELLIGENCE)", body_text, re.DOTALL)
         url = "Unknown"
         if url_match:
             url = url_match.group(1).replace('\n', '').replace(' ', '').strip()
 
-        desc_match = re.search(r"DESCRIPTION(.*?)(REMEDIATION SOLUTION|SOLUTION)", body_text, re.DOTALL)
+        desc_match = re.search(r"(?:DESCRIPTION|VULNERABILITY INTELLIGENCE)\s*(.*?)(?:REMEDIATION SOLUTION|SOLUTION|COUNTERMEASURES & REMEDIATION)", body_text, re.DOTALL)
         description = desc_match.group(1).strip() if desc_match else ""
 
-        sol_match = re.search(r"(REMEDIATION SOLUTION|SOLUTION)(.*?)REFERENCES", body_text, re.DOTALL)
-        solution = sol_match.group(2).strip() if sol_match else ""
+        sol_match = re.search(r"(?:REMEDIATION SOLUTION|SOLUTION|COUNTERMEASURES & REMEDIATION)\s*(.*?)(?:TECHNICAL REFERENCES|REFERENCES)", body_text, re.DOTALL)
+        solution = sol_match.group(1).strip() if sol_match else ""
 
         refs = []
-        ref_match = re.search(r"REFERENCES(.*)", body_text, re.DOTALL)
+        ref_match = re.search(r"(?:TECHNICAL REFERENCES|REFERENCES)\s*(.*?)(?:TCTR THREAT MAGNITUDE|\n[A-Z_]+:|HIGH RISK|MEDIUM RISK|LOW RISK|INFO RISK|$)", body_text, re.DOTALL | re.IGNORECASE)
         if ref_match:
             ref_content = ref_match.group(1)
             lines_ref = ref_content.split('\n')
@@ -161,6 +173,12 @@ def parse_zap_report(raw_text: str) -> Dict[str, Any]:
                 if "http" in line or "owasp" in line.lower():
                     refs.append(line)
 
+        tctr_match = re.search(r"TCTR THREAT MAGNITUDE.*?\n([\d\.]+)%", body_text, re.IGNORECASE)
+        tctr = float(tctr_match.group(1)) if tctr_match else None
+
+        intel_match = re.search(r"Intelligence Breakdown:\s*(.*?)(?:\[|\n|$)", body_text, re.IGNORECASE)
+        intel = intel_match.group(1).strip() if intel_match else None
+
         findings_list.append({
             "name": vuln_name,
             "risk_level": risk_level,
@@ -169,7 +187,9 @@ def parse_zap_report(raw_text: str) -> Dict[str, Any]:
             "url": url,
             "description": description,
             "solution": solution,
-            "references": refs
+            "references": refs,
+            "tctr_magnitude_percent": tctr,
+            "intelligence_breakdown": intel
         })
 
     # --- STEP 3: Reconcile Stats ---
@@ -198,7 +218,8 @@ def parse_zap_report(raw_text: str) -> Dict[str, Any]:
         "scan_metadata": {
             "tool": "OWASP ZAP",
             "report_id": str(uuid.uuid4()),
-            "generated_at": datetime.now().isoformat()
+            "generated_at": datetime.now().isoformat(),
+            **metadata
         },
         "alert_summary": final_stats,
         "findings": findings_list
