@@ -24,7 +24,7 @@ logger = logging.getLogger(__name__)
 env_path = Path('..') / '.env'
 load_dotenv(dotenv_path=env_path)
 
-def load_model(api_key: str = None, model_name: str = "gemini-2.5-flash", tools: list = None, **kwargs):
+def load_model(api_key: str = None, model_name: str = "gemini-2.0-flash", tools: list = None, **kwargs):
     """Loads and configures the Gemini model with optional tools."""
     key_to_use = api_key or kwargs.get('api_key') or os.environ.get("GEMINI_API_KEY")
     if not key_to_use:
@@ -117,3 +117,4 @@ async def generate_response_stream(model, prompt: str, max_tokens: int = 8192, a
     except Exception as e:
         logger.error(f"Error in Gemini streaming: {str(e)}")
         yield f"\n[System Error: {str(e)}]"
+

@@ -4219,18 +4219,14 @@ async def summarize_report_with_llm(
 
     logger.info(f"Generating summary for {report_type} report...")
 
-    try:
-        # Call the passed generate_response_func
-        llm_response = await generate_response_func(llm_instance, prompt, max_tokens=config.DEFAULT_SUMMARIZE_MAX_TOKENS)
+    # Call the passed generate_response_func
+    llm_response = await generate_response_func(llm_instance, prompt, max_tokens=config.DEFAULT_SUMMARIZE_MAX_TOKENS)
+    
+    # If the response is a dict (Gemini), extract 'text'
+    if isinstance(llm_response, dict):
+        return llm_response.get("text", "")
         
-        # If the response is a dict (Gemini), extract 'text'
-        if isinstance(llm_response, dict):
-            return llm_response.get("text", "")
-            
-        return llm_response
-    except Exception as e:
-        logger.error(f"Error generating LLM response for {report_type} summary: {e}")
-        return f"Error generating summary for {report_type} report. Please try again."
+    return llm_response
 
 async def summarize_chat_history_segment(
     llm_instance: Any,
@@ -4374,25 +4370,11 @@ sentence per topic.
         f"{len(conversation_block)} chars."
     )
 
-    try:
-        summary_response = await generate_response_func(
-            llm_instance,
-            summarization_prompt,
-            max_tokens=max_tokens
-        )
-
-    except TypeError as e:
-        logger.error(
-            f"summarize_chat_history_segment: generate_response_func signature mismatch — {e}"
-        )
-        return "(Error summarizing previous conversation: function signature error.)"
-
-    except Exception as e:
-        logger.error(
-            f"summarize_chat_history_segment: unexpected error during generation — {e}",
-            exc_info=True
-        )
-        return "(Error summarizing previous conversation.)"
+    summary_response = await generate_response_func(
+        llm_instance,
+        summarization_prompt,
+        max_tokens=max_tokens
+    )
 
     # --- 6. Normalise Response ---
     # generate_response_func may return either a plain string (Llama-style)

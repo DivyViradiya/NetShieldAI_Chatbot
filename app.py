@@ -93,6 +93,10 @@ _pinecone_index_instance_global = None
 # A lock to prevent multiple threads from initializing LLM/RAG simultaneously
 _init_lock = threading.Lock()
 
+# --- NEW: Summary Cache (Persisted in-memory for the lifecycle of the process) ---
+# Format: { "session_id:filename": "summary_text" }
+_summary_cache: Dict[str, str] = {}
+
 # --- Pydantic Models for Request Bodies ---
 class ChatMessage(BaseModel):
     """Pydantic model for incoming chat messages with options."""
@@ -132,25 +136,33 @@ class DeleteSessionRequest(BaseModel):
 async def execute_with_retry(func, *args, **kwargs):
     """
     Executes an async function with automatic retry logic for Gemini 429 errors.
+    Supports both standard exceptions and Google API specific ResourceExhausted.
     """
-    max_retries = 3
-    base_delay = 30  
+    from google.api_core import exceptions as google_exceptions
+    
+    max_retries = 4
+    base_delay = 15 # Start with 15s delay for 429s on free tier
     
     for attempt in range(max_retries):
         try:
             return await func(*args, **kwargs)
-        except Exception as e:
+        except (google_exceptions.ResourceExhausted, Exception) as e:
             error_str = str(e).lower()
-            if "429" in error_str or "quota" in error_str or "exhausted" in error_str:
+            is_quota_error = isinstance(e, google_exceptions.ResourceExhausted) or \
+                             any(hit in error_str for hit in ["429", "quota", "exhausted", "rate limit"])
+            
+            if is_quota_error:
                 if attempt < max_retries - 1:
-                    logger.warning(f"Gemini Quota Exceeded. Retrying in {base_delay} seconds... (Attempt {attempt + 1}/{max_retries})")
-                    await asyncio.sleep(base_delay)
-                    base_delay += 10 
+                    wait_time = base_delay * (2 ** attempt) # Exponential backoff: 15, 30, 60, 120
+                    logger.warning(f"{LogColors.AGENT}[RETRY] Gemini Quota hit. Waiting {wait_time}s before attempt {attempt + 2}/{max_retries}...{LogColors.RESET}")
+                    await asyncio.sleep(wait_time)
                 else:
-                    logger.error("Max retries reached for Gemini API.")
+                    logger.error(f"{LogColors.EXTERNAL}[FATAL] Max retries reached for Gemini API. Quota is fully exhausted.{LogColors.RESET}")
                     raise e
             else:
+                # Not a quota error, re-raise immediately
                 raise e
+
 
 def _init_global_llm_and_rag():
     """
@@ -297,39 +309,39 @@ def detect_report_type_from_content(text: str, filename: Optional[str] = None) -
 
     # --- HEADER MAPPING (Ordered by specificity) ---
     
-    # 1. SSL (More specific than Nmap)
+    # 1. SSL/TLS Assessment
     if "ssl/tls assessment" in full_header_context or "sslscan" in full_header_context:
         return "sslscan"
 
-    # 2. Kill Chain
+    # 2. Kill Chain Analysis
     if "kill chain" in full_header_context:
         return "killchain"
 
-    # 3. NMAP / Network Scanner
-    if "nmap scan report" in full_header_context or "network scan report" in full_header_context or ("network scan" in full_header_context and "nmap" in full_header_context):
+    # 3. NMAP / Network Scanner (New & Old formats)
+    if any(k in full_header_context for k in ["network intelligence", "nmap scan report", "network scan report"]):
         return "nmap"
     
     # 4. PCAP / Sniffer
-    if "network traffic" in full_header_context or "tshark" in full_header_context or "packet sniffer" in full_header_context:
+    if any(k in full_header_context for k in ["network traffic", "tshark", "packet sniffer"]):
         return "pcap"
     
     # 5. ZAP / Web Vulnerability
-    if "web vulnerability report" in full_header_context or "web vulnerability" in full_header_context or "owasp zap" in full_header_context:
-        # Check for API hint specifically if it's ZAP-templated
-        if "api" in full_header_context or (filename and "api" in filename.lower()):
+    if any(k in full_header_context for k in ["web security audit", "web vulnerability report", "web vulnerability", "owasp zap"]):
+        # Check for API hint specifically if it's ZAP-templated or has common API markers
+        if "api" in full_header_context:
             return "api"
         return "zap"
     
     # 6. SQL Injection
-    if "sql injection audit" in full_header_context or "sql injection security" in full_header_context or "sqlmap" in full_header_context:
+    if any(k in full_header_context for k in ["sql injection audit", "sql injection security", "sqlmap"]):
         return "sql"
 
     # 7. SAST / Semgrep
-    if "source code security analysis" in full_header_context or "static analysis" in full_header_context or "semgrep" in full_header_context:
+    if any(k in full_header_context for k in ["source code security", "static analysis", "semgrep"]):
         return "semgrep"
 
-    # 8. API Scan (Backup)
-    if "api security" in full_header_context or "api scan" in full_header_context or "api_scan" in full_header_context:
+    # 8. API Scan (Backup/Explicit)
+    if any(k in full_header_context for k in ["api security audit", "api security", "api scan", "api_scan"]):
         return "api"
 
     # Final Fallback
@@ -545,9 +557,10 @@ def parse_local_llm_action(text: str) -> Optional[Dict[str, Any]]:
         if target:
             # Ensure URL has a scheme for ZAP
             final_url = target if target.startswith("http") else f"http://{target}"
+            scan_mode = "Full Scan" if "full" in text_lower or "deep" in text_lower else "Quick Scan"
             return {
                 "name": "zap_scan",
-                "args": {"target_url": final_url, "scan_type": "Quick Scan"},
+                "args": {"target_url": final_url, "scan_mode": scan_mode, "use_ajax": "ajax" in text_lower},
                 "monitor_mode": "terminal"
             }
 
@@ -556,9 +569,23 @@ def parse_local_llm_action(text: str) -> Optional[Dict[str, Any]]:
         if target:
             # Strip scheme if present for Nmap
             clean_ip = re.sub(r'^https?://', '', target)
+            
+            # Extract scan type
+            scan_type = "default"
+            for t in ["os", "fragmented", "aggressive", "tcp_syn", "vuln", "udp", "ping_sweep", "tcp_connect", "null", "fin", "xmas", "ack", "window", "decoy"]:
+                if t in text_lower:
+                    scan_type = t
+                    break
+            
+            # Extract timing
+            timing = 4
+            timing_match = re.search(r't([0-5])', text_lower)
+            if timing_match:
+                timing = int(timing_match.group(1))
+            
             return {
                 "name": "nmap_scan",
-                "args": {"target_ip": clean_ip, "scan_type": "default"},
+                "args": {"target_ip": clean_ip, "scan_type": scan_type, "protocol_type": "UDP" if "udp" in text_lower else "TCP", "timing": timing},
                 "monitor_mode": "terminal"
             }
 
@@ -576,11 +603,98 @@ def parse_local_llm_action(text: str) -> Optional[Dict[str, Any]]:
     if "sql injection" in text_lower or "sqli" in text_lower:
         if target:
             final_url = target if target.startswith("http") else f"http://{target}"
+            scan_mode = "full" if "full" in text_lower else "deep" if "deep" in text_lower else "quick"
+            
+            # Extract risk and level
+            risk = "3"
+            risk_match = re.search(r'risk\s*[:=]?\s*([1-3])', text_lower)
+            if risk_match: risk = risk_match.group(1)
+            
+            level = "3"
+            level_match = re.search(r'level\s*[:=]?\s*([1-5])', text_lower)
+            if level_match: level = level_match.group(1)
+
             return {
                 "name": "sql_injection_scan",
-                "args": {"target_url": final_url, "scan_mode": "quick"},
+                "args": {
+                    "target_url": final_url, 
+                    "scan_mode": scan_mode,
+                    "risk_level": risk,
+                    "scan_level": level,
+                    "check_waf": "waf" in text_lower
+                },
                 "monitor_mode": "terminal"
             }
+
+    # 5. Kill Chain Detection
+    if "kill chain" in text_lower or "full audit" in text_lower or "penetration test" in text_lower:
+        if target:
+            # Extract profile
+            profile = "Full Scan"
+            if "recon" in text_lower: profile = "Recon Only"
+            elif "network" in text_lower: profile = "Network Audit"
+            elif "web" in text_lower: profile = "Web Audit"
+            
+            # Extract aggression
+            aggression = "Normal"
+            if "stealth" in text_lower: aggression = "Stealth"
+            elif "attack" in text_lower or "aggressive" in text_lower: aggression = "Attack"
+
+            return {
+                "name": "killchain_audit",
+                "args": {"target": target, "profile": profile, "aggression": aggression},
+                "monitor_mode": "terminal"
+            }
+
+    # 6. API Security Scan
+    if "api scan" in text_lower or "swagger" in text_lower or "openapi" in text_lower:
+        if target:
+            # For API scan, we often need a definition URL. 
+            # If not explicitly found, we might guess or ask, but here we'll try to find another URL.
+            urls = re.findall(r'(https?://[^\s\)]+)', text)
+            def_url = urls[1] if len(urls) > 1 else target # Fallback
+            
+            return {
+                "name": "api_security_scan",
+                "args": {"target_url": target, "definition_url": def_url},
+                "monitor_mode": "terminal"
+            }
+
+    # 7. Semgrep SAST Scan
+    if "sast" in text_lower or "semgrep" in text_lower or "source code" in text_lower:
+        # Look for a git URL
+        git_match = re.search(r'(https?://github\.com/[^\s\)]+)', text)
+        if git_match:
+            return {
+                "name": "semgrep_sast_scan",
+                "args": {"git_url": git_match.group(1)},
+                "monitor_mode": "terminal"
+            }
+
+    # 8. Packet Sniffer
+    if "sniff" in text_lower or "capture" in text_lower or "traffic" in text_lower:
+        if target:
+            clean_ip = re.sub(r'^https?://', '', target)
+            return {
+                "name": "packet_sniffer",
+                "args": {"target_ip": clean_ip, "duration": 30, "max_packets": 50},
+                "monitor_mode": "terminal"
+            }
+
+    # 9. Analysis Trigger
+    if "analyze" in text_lower or "summary" in text_lower or "report" in text_lower:
+        scanner_type = None
+        for s in ["zap", "api", "nmap", "killchain", "sql", "ssl", "semgrep"]:
+            if s in text_lower:
+                scanner_type = s
+                break
+        if scanner_type:
+            return {
+                "name": "scanner_analysis",
+                "args": {"scanner_type": scanner_type},
+                "monitor_mode": "terminal"
+            }
+
 
     return None
 
@@ -626,33 +740,41 @@ async def run_post_upload_processing(session_id: str, user_id: str, parsed_data:
             logger.info(f"Background: Graph built ({new_graph.number_of_nodes()} nodes)")
 
         # 2. Generate Summary with Failover
-        initial_summary = "Report parsed successfully, but summarization failed."
-        requested_mode = llm_mode
-        if requested_mode in config.LLM_FAILOVER_PRIORITY:
-            idx = config.LLM_FAILOVER_PRIORITY.index(requested_mode)
-            failover_sequence = config.LLM_FAILOVER_PRIORITY[idx:]
+        cache_key = f"{session_id}:{original_filename}"
+        if cache_key in _summary_cache:
+            initial_summary = _summary_cache[cache_key]
+            logger.info(f"Background: Using cached summary for {original_filename} in session {session_id}")
         else:
-            failover_sequence = [requested_mode] + config.LLM_FAILOVER_PRIORITY
+            initial_summary = "Report parsed successfully, but summarization failed."
+            requested_mode = llm_mode
+            if requested_mode in config.LLM_FAILOVER_PRIORITY:
+                idx = config.LLM_FAILOVER_PRIORITY.index(requested_mode)
+                failover_sequence = config.LLM_FAILOVER_PRIORITY[idx:]
+            else:
+                failover_sequence = [requested_mode] + config.LLM_FAILOVER_PRIORITY
 
-        for current_mode in failover_sequence:
-            llm_instance = _llm_instances_global.get(current_mode)
-            llm_generate_func = _llm_generate_funcs_global.get(current_mode)
-            if not llm_instance or not llm_generate_func:
-                continue
-            try:
-                initial_summary = await execute_with_retry(
-                    summarize_report_with_llm,
-                    llm_instance,
-                    llm_generate_func,
-                    parsed_data,
-                    report_type
-                )
-                if current_mode != requested_mode:
-                    initial_summary = f"[Note: Summary generated using {current_mode} failsafe]\n\n" + initial_summary
-                break
-            except Exception as e:
-                logger.warning(f"Background: Summarization failed for {current_mode}: {e}")
-                continue
+            for current_mode in failover_sequence:
+                llm_instance = _llm_instances_global.get(current_mode)
+                llm_generate_func = _llm_generate_funcs_global.get(current_mode)
+                if not llm_instance or not llm_generate_func:
+                    continue
+                try:
+                    initial_summary = await execute_with_retry(
+                        summarize_report_with_llm,
+                        llm_instance,
+                        llm_generate_func,
+                        parsed_data,
+                        report_type
+                    )
+                    if current_mode != requested_mode:
+                        initial_summary = f"[Note: Summary generated using {current_mode} failsafe]\n\n" + initial_summary
+                    
+                    # Cache the result
+                    _summary_cache[cache_key] = initial_summary
+                    break
+                except Exception as e:
+                    logger.warning(f"Background: Summarization failed for {current_mode}: {e}")
+                    continue
 
         # 3. Inject report content info into history (Role: system)
         report_msg = f"SYSTEM_NOTIFICATION: Scan Complete. {report_type.upper()} Report successfully synchronized. Summary: {initial_summary}"

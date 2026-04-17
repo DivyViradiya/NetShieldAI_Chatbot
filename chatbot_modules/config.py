@@ -8,8 +8,9 @@ PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 DEFAULT_LLM_MODE = "gemini-2.5-flash"
 SUPPORTED_LLM_MODES = [
-    "gemini-2.5-flash-lite", 
-    "gemini-2.5-flash", 
+    "gemini-2.0-flash-lite", 
+    "gemini-2.0-flash", 
+    "gemini-2.5-flash",
     "gemini-2.5-pro", 
     "gemini-3-flash-preview", 
     "gemini-3-pro-preview", 
@@ -20,8 +21,9 @@ SUPPORTED_LLM_MODES = [
 
 # Failover Priority List (Order of attempt if one fails)
 LLM_FAILOVER_PRIORITY = [
-    "gemini-2.5-flash-lite",
     "gemini-2.5-flash",
+    "gemini-2.0-flash",
+    "gemini-2.0-flash-lite",
     "gemini-2.5-pro",
     "gemini-3-flash-preview",
     "gemini-3-pro-preview",

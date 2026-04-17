@@ -11,13 +11,13 @@ SECURITY_TOOLS = [
                     "type": "object",
                     "properties": {
                         "target_ip": {"type": "string", "description": "IP address, Domain, or CIDR range (e.g., '192.168.1.1', 'example.com')."},
-                        "protocol_type": {"type": "string", "enum": ["TCP", "UDP"]},
+                        "protocol_type": {"type": "string", "enum": ["TCP", "UDP"], "description": "Default is TCP."},
                         "scan_type": {
                             "type": "string", 
                             "enum": ["default", "os", "fragmented", "aggressive", "tcp_syn", "vuln", "udp", "ping_sweep", "tcp_connect", "null", "fin", "xmas", "ack", "window", "decoy"],
                             "description": "The Nmap scan type. Always ask the user to choose."
                         },
-                        "timing": {"type": "integer", "description": "Timing template (0-5). Always ask the user to choose."}
+                        "timing": {"type": "integer", "description": "Timing template (0-5). Default is 4 (Aggressive)."}
                     },
                     "required": ["target_ip", "protocol_type", "scan_type", "timing"]
                 }
@@ -29,11 +29,11 @@ SECURITY_TOOLS = [
                     "type": "object",
                     "properties": {
                         "target_url": {"type": "string", "description": "The full website URL to scan (e.g., 'http://testphp.vulnweb.com')."},
-                        "scan_mode": {"type": "string", "enum": ["Quick Scan", "Full Scan"], "description": "Select Quick or Full. Always ask the user."},
+                        "scan_mode": {"type": "string", "enum": ["Quick Scan", "Full Scan", "Deep Scan"], "description": "Select the scan intensity. Always ask the user."},
                         "use_ajax": {"type": "boolean", "description": "Set to true to use AJAX Spider for modern SPAs/dynamic sites. Always ask the user."},
                         "auth_config": {
                             "type": "object",
-                            "description": "Optional configuration for Form-Based Authentication. You do not strictly have to ask for this if unneeded.",
+                            "description": "Optional configuration for Form-Based Authentication.",
                             "properties": {
                                 "login_url": {"type": "string"},
                                 "username_field": {"type": "string"},
@@ -59,12 +59,15 @@ SECURITY_TOOLS = [
             },
             {
                 "name": "sql_injection_scan",
-                "description": "Perform an asynchronous specialized SQL injection audit. Progress will be shown in a live terminal.",
+                "description": "Perform an asynchronous specialized SQL injection audit using SQLMap. Progress will be shown in a live terminal.",
                 "parameters": {
                     "type": "object",
                     "properties": {
                         "target_url": {"type": "string", "description": "The target URL to test for SQLi."},
-                        "scan_mode": {"type": "string", "enum": ["quick", "full", "deep"], "description": "Select the verbosity level. Always ask the user."}
+                        "scan_mode": {"type": "string", "enum": ["quick", "full", "deep"], "description": "Select the verbosity level. Always ask the user."},
+                        "risk_level": {"type": "string", "enum": ["1", "2", "3"], "description": "Risk of tests (1-3). Default 3."},
+                        "scan_level": {"type": "string", "enum": ["1", "2", "3", "4", "5"], "description": "Level of tests (1-5). Default 3."},
+                        "check_waf": {"type": "boolean", "description": "Whether to check for a WAF."}
                     },
                     "required": ["target_url", "scan_mode"]
                 }
