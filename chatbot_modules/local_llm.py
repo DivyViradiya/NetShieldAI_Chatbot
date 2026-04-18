@@ -3,18 +3,7 @@ import logging
 from huggingface_hub import hf_hub_download
 from llama_cpp import Llama
 import asyncio
-import asyncio
-
-# Visual Logging Colors
-class LogColors:
-    EXTERNAL = "\033[94m" # Blue
-    INTERNAL = "\033[92m" # Green
-    AGENT = "\033[93m"    # Yellow
-    HYBRID = "\033[95m"   # Magenta
-    ROUTER = "\033[96m"   # Cyan
-    INIT = "\033[97m"     # White
-    SUCCESS = "\033[92m"  # Green
-    RESET = "\033[0m"
+from chatbot_modules.config import LogColors
 
 # Initialize module logger
 logger = logging.getLogger(__name__)
@@ -70,27 +59,6 @@ async def generate_response(llm: Llama, prompt: str, max_tokens: int = 2048) -> 
         "tool_call": None # Local model doesn't support native tool calls yet
     }
 
-# --- STREAMING FUNCTION ---
-def generate_response_stream(llm: Llama, prompt: str, max_tokens: int = 2048):
-    """
-    Synchronous Generator for Streaming.
-    """
-    try:
-        stream = llm.create_chat_completion(
-            messages=[
-                {"role": "system", "content": "You are a helpful cybersecurity coding assistant."},
-                {"role": "user", "content": prompt}
-            ],
-            max_tokens=max_tokens,
-            temperature=0.7,
-            stream=True 
-        )
-        
-        for chunk in stream:
-            delta = chunk["choices"][0]["delta"]
-            if "content" in delta:
-                yield delta["content"]
-                
-    except Exception as e:
-        logger.error(f"Error in Local LLM streaming: {e}")
-        yield f"\n[Local AI Error: {str(e)}]"
+# Note: Streaming functionality (generate_response_stream) has been 
+# deprecated and removed. The async /chat_stream endpoint now falls back 
+# to the local model via the blocking execute_with_retry wrapper.

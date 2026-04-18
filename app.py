@@ -8,6 +8,7 @@ import time
 import asyncio
 import re  # <--- Added for text normalization
 from typing import Dict, Any, List, Optional
+from collections import OrderedDict
 import dotenv
 
 # --- FASTAPI & PYDANTIC IMPORTS ---
@@ -17,6 +18,10 @@ from fastapi.responses import JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from starlette.concurrency import run_in_threadpool, iterate_in_threadpool 
 from pydantic import BaseModel
+from contextlib import asynccontextmanager
+from slowapi import Limiter
+from slowapi.util import get_remote_address
+from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
 dotenv.load_dotenv()
 
@@ -79,11 +84,6 @@ UPLOAD_FOLDER = os.path.join(current_dir, 'uploads')
 os.makedirs(UPLOAD_FOLDER, exist_ok=True)
 MAX_CONTENT_LENGTH = 16 * 1024 * 1024  # 16 MB max file size
 
-app = FastAPI()
-
-# Mount Static Files for Uploads (e.g., for persisting images in chat history)
-app.mount("/chatbot_uploads", StaticFiles(directory=UPLOAD_FOLDER), name="chatbot_uploads")
-
 # Global state for LLM and RAG components (loaded once)
 _llm_instances_global: Dict[str, Any] = {} 
 _llm_generate_funcs_global: Dict[str, Any] = {} 
@@ -95,7 +95,9 @@ _init_lock = threading.Lock()
 
 # --- NEW: Summary Cache (Persisted in-memory for the lifecycle of the process) ---
 # Format: { "session_id:filename": "summary_text" }
-_summary_cache: Dict[str, str] = {}
+# Uses OrderedDict to enforce LRU cache eviction and prevent unbounded memory growth.
+MAX_SUMMARY_CACHE_SIZE = 50
+_summary_cache: OrderedDict[str, str] = OrderedDict()
 
 # --- Pydantic Models for Request Bodies ---
 class ChatMessage(BaseModel):
@@ -120,7 +122,18 @@ class DeleteAllSessionsRequest(BaseModel):
     """New model for bulk user cleanup."""
     user_id: str
 
-# --- NEW PYDANTIC MODELS FOR SESSION MANAGEMENT ---
+# --- SECURITY: PROMPT INJECTION SANITIZATION ---
+INJECTION_PATTERNS = [r'ignore (all )?previous', r'system:\s*you are now', r'forget (everything|above)']
+
+def sanitize_input(text: str) -> str:
+    if not text:
+        return text
+    for p in INJECTION_PATTERNS:
+        if re.search(p, text, re.IGNORECASE):
+            logger.warning(f"{LogColors.AGENT}[SECURITY] Prompt injection intercepted in user query.{LogColors.RESET}")
+            return "[INPUT_SANITIZED_DUE_TO_SECURITY_POLICY]"
+    return text
+
 class RenameRequest(BaseModel):
     session_id: str
     new_title: str
@@ -229,10 +242,10 @@ def _init_global_llm_and_rag():
                 _pinecone_index_instance_global = None
 
 def get_llm_instance():
-    if _llm_instances_global is None:
+    if not _llm_instances_global:
         _init_global_llm_and_rag()
-    if _llm_instances_global is None:
-        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="LLM instance not available.")
+    if not _llm_instances_global:
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="LLM instances not initialized.")
     return _llm_instances_global
 
 def get_embedding_model_instance():
@@ -246,9 +259,9 @@ def get_pinecone_index_instance():
     return _pinecone_index_instance_global
 
 
-@app.on_event("startup")
-async def startup_event():
-    """Initializes global resources when the FastAPI app starts."""
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Lifecycle manager for global resources in the FastAPI app."""
     logger.info(f"{LogColors.INIT}[INIT] FastAPI starting up...{LogColors.RESET}")
     
     # --- PHASE 1: INIT DATABASE ---
@@ -259,11 +272,31 @@ async def startup_event():
         logger.error(f"Failed to initialize database: {e}")
     
     _init_global_llm_and_rag()
-    logger.info("Startup complete.")
+    
+    # --- PHASE 2: AUTO-CLEANUP SCHEDULER ---
+    async def cleanup_stale_sessions():
+        logger.info(f"{LogColors.ROUTER}[SCHEDULER] Running Pinecone TTL Garbage Collection...{LogColors.RESET}")
+        try:
+            stale_ids = await run_in_threadpool(db_utils.get_stale_sessions, 7)
+            for sid in stale_ids:
+                try:
+                    logger.info(f"Auto-cleanup: Purging stale session {sid}")
+                    await run_in_threadpool(delete_namespace, sid)
+                    await run_in_threadpool(db_utils.delete_session, sid)
+                except Exception as e:
+                    logger.error(f"Failed to cleanup session {sid}: {e}")
+        except Exception as e:
+            logger.error(f"Scheduler failed to fetch stale sessions: {e}")
 
-@app.on_event("shutdown")
-async def shutdown_event():
-    """Cleans up global resources when the FastAPI app shuts down."""
+    scheduler = AsyncIOScheduler()
+    scheduler.add_job(cleanup_stale_sessions, 'interval', minutes=60) # Run hourly to check for 7-day stale sessions
+    scheduler.start()
+    
+    logger.info("Startup complete.")
+    
+    yield  # Application runs while yielded
+    
+    scheduler.shutdown()
     global _llm_instances_global, _embedding_model_instance_global, _pinecone_index_instance_global
 
     logger.info("FastAPI app shutdown event - Cleaning up global resources...")
@@ -280,6 +313,53 @@ async def shutdown_event():
     _embedding_model_instance_global = None
     _pinecone_index_instance_global = None
     logger.info("Global resources cleanup complete.")
+
+# --- APP INITIALIZATION ---
+# Initializing app after lifespan and other dependent objects are defined
+app = FastAPI(lifespan=lifespan)
+
+# --- SECURITY: Rate Limiting ---
+limiter = Limiter(key_func=lambda request: request.query_params.get("user_id", get_remote_address(request)))
+app.state.limiter = limiter
+
+# --- SECURITY: Configure CORS Middleware ---
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["http://localhost:5100"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+# Mounting static files
+app.mount("/chatbot_uploads", StaticFiles(directory=UPLOAD_FOLDER), name="chatbot_uploads")
+
+# --- SECURITY: RFC 7807 Error Responses ---
+@app.exception_handler(HTTPException)
+async def http_exception_handler(request: Request, exc: HTTPException):
+    return JSONResponse(
+        status_code=exc.status_code,
+        content={"type": "about:blank", "title": "HTTP Exception", "status": exc.status_code, "detail": exc.detail, "instance": request.url.path}
+    )
+
+@app.exception_handler(Exception)
+async def global_exception_handler(request: Request, exc: Exception):
+    logger.error(f"Unhandled server error: {exc}", exc_info=True)
+    return JSONResponse(
+        status_code=500,
+        content={"type": "about:blank", "title": "Internal Server Error", "status": 500, "detail": "An unexpected error occurred.", "instance": request.url.path}
+    )
+
+# --- HEALTH & READINESS PROBE ---
+@app.get("/health")
+async def health_check():
+    """Essential for Docker health checks and load balancer probes."""
+    return {
+        "status": "ok" if _llm_instances_global else "degraded",
+        "llm_ready": bool(_llm_instances_global),
+        "rag_ready": _embedding_model_instance_global is not None,
+        "active_models": list(_llm_instances_global.keys()) if isinstance(_llm_instances_global, dict) else []
+    }
 
 # --- IMPROVED REPORT DETECTION LOGIC ---
 def detect_report_type_from_content(text: str, filename: Optional[str] = None) -> str:
@@ -743,6 +823,8 @@ async def run_post_upload_processing(session_id: str, user_id: str, parsed_data:
         cache_key = f"{session_id}:{original_filename}"
         if cache_key in _summary_cache:
             initial_summary = _summary_cache[cache_key]
+            # Move to end to mark as recently used
+            _summary_cache.move_to_end(cache_key)
             logger.info(f"Background: Using cached summary for {original_filename} in session {session_id}")
         else:
             initial_summary = "Report parsed successfully, but summarization failed."
@@ -769,8 +851,10 @@ async def run_post_upload_processing(session_id: str, user_id: str, parsed_data:
                     if current_mode != requested_mode:
                         initial_summary = f"[Note: Summary generated using {current_mode} failsafe]\n\n" + initial_summary
                     
-                    # Cache the result
+                    # Cache the result and enforce LRU size limit
                     _summary_cache[cache_key] = initial_summary
+                    if len(_summary_cache) > MAX_SUMMARY_CACHE_SIZE:
+                        _summary_cache.popitem(last=False)
                     break
                 except Exception as e:
                     logger.warning(f"Background: Summarization failed for {current_mode}: {e}")
@@ -952,7 +1036,7 @@ async def upload_report(
         )
     finally:
         # Only cleanup if it was a temporary upload
-        if is_temporary_file and os.path.exists(target_file_to_process):
+        if is_temporary_file and target_file_to_process and os.path.exists(target_file_to_process):
             os.remove(target_file_to_process)
             logger.info(f"Cleaned up temporary upload: {target_file_to_process}")
 @app.post("/chat")
@@ -1207,6 +1291,10 @@ async def process_attachments(files: List[UploadFile]) -> List[Dict[str, Any]]:
     chatbot_upload_dir = os.path.join(UPLOAD_FOLDER, "chatbot")
     os.makedirs(chatbot_upload_dir, exist_ok=True)
     for file in files:
+        if file.size and file.size > MAX_CONTENT_LENGTH:
+            logger.warning(f"File {file.filename} exceeds MAX_CONTENT_LENGTH. Skipping.")
+            continue
+            
         content = await file.read()
         ext = os.path.splitext(file.filename)[1].lower()
         mime = file.content_type
@@ -1266,8 +1354,37 @@ async def process_attachments(files: List[UploadFile]) -> List[Dict[str, Any]]:
                 
     return processed
 
+def parse_local_llm_action(text: str) -> Optional[dict]:
+    """
+    Parses potential security tool actions from local LLM text output.
+    Uses regex to find 'ACTION: tool_name(parameters)' pattern.
+    Returns CANONICAL schema: {"tool": str, "parameters": dict, "monitor_mode": "terminal"}
+    """
+    try:
+        # Example output: "I will now run ACTION: nmap_scan(target_ip='192.168.1.1')"
+        pattern = r"ACTION:\s*([a-zA-Z0-9_]+)\((.*?)\)"
+        match = re.search(pattern, text)
+        if match:
+            tool_name = match.group(1)
+            params_str = match.group(2)
+            
+            # Simple param parser for key='value' or key=value
+            params = {}
+            for param_match in re.finditer(r"([a-zA-Z0-9_]+)\s*=\s*['\"]?(.*?)['\"]?(?:,|$)", params_str):
+                params[param_match.group(1)] = param_match.group(2)
+                
+            return {
+                "tool": tool_name,
+                "parameters": params,
+                "monitor_mode": "terminal"
+            }
+    except Exception as e:
+        logger.error(f"Error parsing local action: {e}")
+    return None
+
 # --- UPDATED CHAT STREAM ENDPOINT ---
 @app.post("/chat_stream")
+@limiter.limit("30/minute")
 async def chat_stream(
     request: Request,
     message: Optional[str] = Form(None),
@@ -1300,9 +1417,11 @@ async def chat_stream(
         # Convert string bools from form data
         is_incognito = str(is_incognito).lower() == 'true'
         llm_mode = llm_mode if llm_mode in config.SUPPORTED_LLM_MODES else config.DEFAULT_LLM_MODE
-
     if not user_id:
         raise HTTPException(status_code=400, detail="user_id is required")
+
+    # --- SECURITY: Sanitize Input ---
+    user_question = sanitize_input(user_question)
 
     # --- 2. Session Retrieval & Creation ---
     session_data = None
@@ -1450,6 +1569,7 @@ async def chat_stream(
         failover_sequence = [requested_mode] + config.LLM_FAILOVER_PRIORITY
 
     async def response_generator():
+        # nonlocal not strictly needed if only reading, but kept for clarity if session_id were to be modified
         nonlocal session_id
         full_response_accumulator = ""
         action_found = None 
@@ -1461,7 +1581,7 @@ async def chat_stream(
                 continue
 
             try:
-                if used_mode != requested_mode:
+                if mode != requested_mode:
                     yield f"[System: Model {requested_mode} unavailable. Switched to {mode} failsafe.]\n\n"
 
                 if mode == "local":
@@ -1474,19 +1594,26 @@ async def chat_stream(
                     local_action = parse_local_llm_action(full_response_accumulator)
                     if local_action:
                         action_found = {
-                            "tool": local_action["name"],
-                            "parameters": local_action["args"],
-                            "monitor_mode": "terminal"
+                            "tool": local_action["tool"],
+                            "parameters": local_action["parameters"],
+                            "monitor_mode": "terminal",
+                            "action_id": str(uuid.uuid4())
                         }
                 else:
                     # Gemini Multimodal Streaming
                     async for chunk in gemini_llm_module.generate_response_stream(instance, final_prompt, attachments=image_attachments):
                         if chunk:
                             if chunk.startswith("__TOOL_CALL__:"):
+                                # Format: __TOOL_CALL__:tool_name:json_args
                                 parts = chunk.split(":", 2)
                                 tool_name = parts[1]
                                 tool_args = json.loads(parts[2])
-                                action_found = {"tool": tool_name, "parameters": tool_args, "monitor_mode": "terminal"}
+                                action_found = {
+                                    "tool": tool_name, 
+                                    "parameters": tool_args, 
+                                    "monitor_mode": "terminal",
+                                    "action_id": str(uuid.uuid4())
+                                }
                                 logger.info(f"{LogColors.AGENT}[AGENT] Tool Triggered in stream: {tool_name}{LogColors.RESET}")
                             else:
                                 full_response_accumulator += chunk
@@ -1514,7 +1641,9 @@ async def chat_stream(
     headers = {"X-Session-ID": session_id}
     return StreamingResponse(response_generator(), media_type="text/plain", headers=headers)
 
+# --- Unified Chat Endpoint ---
 @app.post("/chat")
+@limiter.limit("30/minute")
 async def chat(
     request: Request,
     message: Optional[str] = Form(None),
@@ -1525,26 +1654,34 @@ async def chat(
     llm_mode: Optional[str] = Form(config.DEFAULT_LLM_MODE),
     files: List[UploadFile] = File([])
 ):
-    """Handles user chat messages (BLOCKING MODE) with multimodal support."""
-    # 1. Handle JSON Failsafe
+    """
+    Unified endpoint for blocking chat. 
+    Detects if request is JSON or Multipart/Form-data automatically.
+    """
+    # 1. Poly-Input Handling (JSON vs Form-data)
     if not message and not files:
         try:
             body = await request.json()
-            chat_message = ChatMessage(**body)
-            user_question = chat_message.message
-            session_id = chat_message.session_id
-            user_id = chat_message.user_id
-            verbosity = chat_message.verbosity
-            is_incognito = chat_message.is_incognito
-            llm_mode = chat_message.llm_mode
+            user_question = body.get("message")
+            session_id = body.get("session_id")
+            user_id = body.get("user_id")
+            verbosity = body.get("verbosity", "standard")
+            is_incognito = body.get("is_incognito", False)
+            llm_mode = body.get("llm_mode", config.DEFAULT_LLM_MODE)
         except Exception:
-             raise HTTPException(status_code=400, detail="Missing message")
+             raise HTTPException(status_code=400, detail="Missing message or content")
     else:
         user_question = message
         is_incognito = str(is_incognito).lower() == 'true'
         llm_mode = llm_mode if llm_mode in config.SUPPORTED_LLM_MODES else config.DEFAULT_LLM_MODE
 
-    # 2. Session Retrieval
+    if not user_id:
+        raise HTTPException(status_code=400, detail="user_id is required")
+
+    # --- SECURITY: Sanitize Input ---
+    user_question = sanitize_input(user_question)
+
+    # 2. Session Logic
     session_data = None
     if session_id:
         session_data = db_utils.get_session_by_id(session_id)
@@ -1563,28 +1700,27 @@ async def chat(
         if part["type"] == "text":
             augmented_question = part["content"] + "\n" + augmented_question
         elif part["type"] == "image":
-            image_attachments.append({
-                "mime_type": part["mime_type"], 
-                "data": part["data"],
-                "url": part["url"],
-                "name": part["name"]
-            })
+            image_attachments.append({"mime_type": part["mime_type"], "data": part["data"], "url": part["url"], "name": part["name"]})
 
     if not is_incognito:
         attachment_json = json.dumps([{"url": a["url"], "name": a["name"], "type": "image"} for a in image_attachments]) if image_attachments else None
         db_utils.add_message(session_id, "user", user_question, attachments=attachment_json)
-        db_utils.update_or_create_session(user_id=user_id, session_id=session_id)
 
-    # 4. Build Prompt
+    # 4. Build Context
     chat_history_db = db_utils.get_chat_history(session_id, limit=config.CHAT_HISTORY_MAX_TURNS)
-    chat_history = [{"role": row['role'], "content": row['content']} for row in chat_history_db[:-1]] # Exclude the message we just added
+    chat_history = [{"role": row['role'], "content": row['content']} for row in chat_history_db[:-1]]
     
-    prompt = f"System: NetShieldAI Orchestrator.\n{orchestrator_prompt}\n"
+    # Static Prompt Context
+    system_ctx = f"System: NetShieldAI Orchestrator.\n{orchestrator_prompt}\n"
+    if verbosity == "concise":
+        system_ctx += "System: Provide a concise answer.\n"
+    
+    final_prompt = system_ctx
     for m in chat_history:
-        prompt += f"{m['role'].capitalize()}: {m['content']}\n"
-    prompt += f"User: {augmented_question}\nAssistant:"
+        final_prompt += f"{m['role'].capitalize()}: {m['content']}\n"
+    final_prompt += f"User: {augmented_question}\nAssistant:"
 
-    # 5. Generation with Failover
+    # 5. Generation
     used_mode = llm_mode
     llm_result = None
     failover_sequence = [llm_mode] + [m for m in config.SUPPORTED_LLM_MODES if m != llm_mode]
@@ -1595,9 +1731,16 @@ async def chat(
         if not instance or not gen_func: continue
         try:
             if mode != "local":
-                llm_result = await execute_with_retry(gen_func, instance, prompt, attachments=image_attachments)
+                llm_result = await execute_with_retry(gen_func, instance, final_prompt, attachments=image_attachments)
             else:
-                llm_result = await execute_with_retry(gen_func, instance, prompt)
+                llm_result = await execute_with_retry(gen_func, instance, final_prompt)
+            
+            # Map Tool Actions for Local Mode if text-based tools are found
+            if mode == "local" and llm_result and not llm_result.get("tool_call"):
+                local_tool = parse_local_llm_action(llm_result.get("text", ""))
+                if local_tool:
+                    llm_result["tool_call"] = local_tool
+            
             used_mode = mode
             break
         except Exception: continue
@@ -1607,6 +1750,8 @@ async def chat(
 
     llm_response_text = llm_result.get("text", "")
     tool_action = llm_result.get("tool_call")
+    if tool_action and not tool_action.get("action_id"):
+        tool_action["action_id"] = str(uuid.uuid4())
 
     if not is_incognito:
         content_to_save = llm_response_text
@@ -1618,7 +1763,8 @@ async def chat(
         'success': True,
         'response': llm_response_text,
         'action': tool_action,
-        'session_id': session_id
+        'session_id': session_id,
+        'mode': used_mode
     })
 
 @app.post("/clear_history")

@@ -1,4 +1,5 @@
 import sqlite3
+import threading
 import json
 import os
 from datetime import datetime
@@ -13,12 +14,21 @@ logger = logging.getLogger(__name__)
 DB_FOLDER = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "data")
 DB_PATH = os.path.join(DB_FOLDER, "sessions.db")
 
+_local = threading.local()
+
+def get_db_connection():
+    if not hasattr(_local, "conn"):
+        _local.conn = sqlite3.connect(DB_PATH)
+        # Enable WAL for better concurrency and multi-threading
+        _local.conn.execute('PRAGMA journal_mode=WAL')
+    return _local.conn
+
 def init_db():
     """Initializes the SQLite database and creates tables with the new multi-session schema."""
     if not os.path.exists(DB_FOLDER):
         os.makedirs(DB_FOLDER)
 
-    conn = sqlite3.connect(DB_PATH)
+    conn = get_db_connection()
     cursor = conn.cursor()
 
     # Table: User Sessions
@@ -77,19 +87,17 @@ def init_db():
     except Exception as e:
         logger.error(f"Migration error (attachments column): {e}")
 
-    conn.close()
 
 # --- Session Management ---
 
 def get_session_by_id(session_id: str) -> Optional[Dict]:
     """Retrieves a specific session by its ID."""
-    conn = sqlite3.connect(DB_PATH)
+    conn = get_db_connection()
     conn.row_factory = sqlite3.Row
     cursor = conn.cursor()
     
     cursor.execute("SELECT * FROM user_sessions WHERE session_id = ?", (session_id,))
     row = cursor.fetchone()
-    conn.close()
     
     if row:
         data = dict(row)
@@ -106,7 +114,7 @@ def get_user_session(user_id: str) -> Optional[Dict]:
     Retrieves the most recently active session for a user.
     Used as a fallback if no specific session_id is requested.
     """
-    conn = sqlite3.connect(DB_PATH)
+    conn = get_db_connection()
     conn.row_factory = sqlite3.Row
     cursor = conn.cursor()
     
@@ -118,7 +126,6 @@ def get_user_session(user_id: str) -> Optional[Dict]:
     """, (user_id,))
     
     row = cursor.fetchone()
-    conn.close()
     
     if row:
         data = dict(row)
@@ -132,7 +139,7 @@ def get_user_session(user_id: str) -> Optional[Dict]:
 
 def update_or_create_session(user_id: str, session_id: str, report_type: str = None, pinecone_namespace: str = None, parsed_report_data: Dict = None, title: str = None, status: str = None):
     """Creates a new session or updates an existing one."""
-    conn = sqlite3.connect(DB_PATH)
+    conn = get_db_connection()
     cursor = conn.cursor()
     
     timestamp = datetime.now()
@@ -180,13 +187,12 @@ def update_or_create_session(user_id: str, session_id: str, report_type: str = N
         ''', (session_id, user_id, final_title, final_status, report_type, pinecone_namespace, parsed_data_json, timestamp))
         
     conn.commit()
-    conn.close()
 
 # --- Graph Management (Hybrid RAG) ---
 
 def save_session_graph(session_id: str, graph_json: str):
     """Saves serialized NetworkX graph data to the database."""
-    conn = sqlite3.connect(DB_PATH)
+    conn = get_db_connection()
     cursor = conn.cursor()
     # Upsert logic (INSERT OR REPLACE)
     cursor.execute('''
@@ -197,15 +203,13 @@ def save_session_graph(session_id: str, graph_json: str):
             last_updated=CURRENT_TIMESTAMP
     ''', (session_id, graph_json))
     conn.commit()
-    conn.close()
 
 def get_session_graph(session_id: str) -> Optional[str]:
     """Retrieves serialized NetworkX graph data from the database."""
-    conn = sqlite3.connect(DB_PATH)
+    conn = get_db_connection()
     cursor = conn.cursor()
     cursor.execute("SELECT graph_json FROM session_graphs WHERE session_id = ?", (session_id,))
     row = cursor.fetchone()
-    conn.close()
     if row:
         return row[0]
     return None
@@ -214,25 +218,23 @@ def get_session_graph(session_id: str) -> Optional[str]:
 
 def rename_session(session_id: str, new_title: str):
     """Updates the title of a specific session."""
-    conn = sqlite3.connect(DB_PATH)
+    conn = get_db_connection()
     cursor = conn.cursor()
     cursor.execute("UPDATE user_sessions SET title = ? WHERE session_id = ?", (new_title, session_id))
     conn.commit()
-    conn.close()
 
 def toggle_pin_session(session_id: str, is_pinned: bool):
     """Updates the pinned status of a session."""
     # SQLite stores boolean as 1 or 0
     pin_val = 1 if is_pinned else 0
-    conn = sqlite3.connect(DB_PATH)
+    conn = get_db_connection()
     cursor = conn.cursor()
     cursor.execute("UPDATE user_sessions SET is_pinned = ? WHERE session_id = ?", (pin_val, session_id))
     conn.commit()
-    conn.close()
 
 def delete_session(session_id: str):
     """Permanently deletes a session and its chat history."""
-    conn = sqlite3.connect(DB_PATH)
+    conn = get_db_connection()
     cursor = conn.cursor()
     # Delete history first (Foreign Key logic)
     cursor.execute("DELETE FROM chat_history WHERE session_id = ?", (session_id,))
@@ -241,19 +243,17 @@ def delete_session(session_id: str):
     # Delete session
     cursor.execute("DELETE FROM user_sessions WHERE session_id = ?", (session_id,))
     conn.commit()
-    conn.close()
 
 def clear_chat_history(session_id: str):
     """Deletes all messages for a session but keeps the session metadata (and report)."""
-    conn = sqlite3.connect(DB_PATH)
+    conn = get_db_connection()
     cursor = conn.cursor()
     cursor.execute("DELETE FROM chat_history WHERE session_id = ?", (session_id,))
     conn.commit()
-    conn.close()
 
 def delete_all_user_sessions(user_id: str):
     """Permanently deletes all sessions and history for a specific user."""
-    conn = sqlite3.connect(DB_PATH)
+    conn = get_db_connection()
     cursor = conn.cursor()
     
     # 1. Get all session IDs for this user
@@ -271,20 +271,18 @@ def delete_all_user_sessions(user_id: str):
         cursor.execute("DELETE FROM user_sessions WHERE user_id = ?", (user_id,))
         
     conn.commit()
-    conn.close()
     return session_ids # Return to help with Pinecone cleanup
 
 # --- Message Management ---
 
 def add_message(session_id: str, role: str, content: str, attachments: str = None):
-    conn = sqlite3.connect(DB_PATH)
+    conn = get_db_connection()
     cursor = conn.cursor()
     cursor.execute('''
         INSERT INTO chat_history (session_id, role, content, attachments)
         VALUES (?, ?, ?, ?)
     ''', (session_id, role, content, attachments))
     conn.commit()
-    conn.close()
 
 def add_system_notification(session_id: str, message: str, type: str = "SCAN_COMPLETE"):
     """
@@ -295,7 +293,7 @@ def add_system_notification(session_id: str, message: str, type: str = "SCAN_COM
     add_message(session_id, "system", formatted_msg)
 
 def get_chat_history(session_id: str, limit: int = 50) -> List[Dict]:
-    conn = sqlite3.connect(DB_PATH)
+    conn = get_db_connection()
     conn.row_factory = sqlite3.Row
     cursor = conn.cursor()
     cursor.execute('''
@@ -307,12 +305,11 @@ def get_chat_history(session_id: str, limit: int = 50) -> List[Dict]:
         ) ORDER BY id ASC
     ''', (session_id, limit))
     rows = cursor.fetchall()
-    conn.close()
     return [dict(row) for row in rows]
 
 def clear_user_data(user_id: str):
     """Wipes ALL data for a user (Master Reset)."""
-    conn = sqlite3.connect(DB_PATH)
+    conn = get_db_connection()
     cursor = conn.cursor()
     
     # Find all sessions for user
@@ -325,7 +322,6 @@ def clear_user_data(user_id: str):
         
     cursor.execute("DELETE FROM user_sessions WHERE user_id = ?", (user_id,))
     conn.commit()
-    conn.close()
 
 def get_all_user_sessions(user_id: str) -> List[Dict]:
     """
@@ -333,7 +329,7 @@ def get_all_user_sessions(user_id: str) -> List[Dict]:
     1. Pinned sessions (Top)
     2. Most recently active (Descending)
     """
-    conn = sqlite3.connect(DB_PATH)
+    conn = get_db_connection()
     conn.row_factory = sqlite3.Row
     cursor = conn.cursor()
     
@@ -345,7 +341,6 @@ def get_all_user_sessions(user_id: str) -> List[Dict]:
     ''', (user_id,))
     
     rows = cursor.fetchall()
-    conn.close()
     
     results = []
     for row in rows:
@@ -364,3 +359,13 @@ def get_all_user_sessions(user_id: str) -> List[Dict]:
             "is_pinned": bool(row['is_pinned']) # Return boolean for frontend
         })
     return results
+
+def get_stale_sessions(days_old: int = 7) -> List[str]:
+    """Returns a list of session_ids that have been inactive for more than days_old."""
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    
+    threshold_date = datetime.now() - __import__('datetime').timedelta(days=days_old)
+    cursor.execute("SELECT session_id FROM user_sessions WHERE last_active < ?", (threshold_date,))
+    rows = cursor.fetchall()
+    return [row[0] for row in rows]

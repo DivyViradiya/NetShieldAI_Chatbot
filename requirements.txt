@@ -3,9 +3,11 @@ python-dotenv
 transformers
 sentence-transformers
 pinecone
-pypdf2
+pypdf>=4.0.0
 langchain
 fastapi
 huggingface_hub
 python-multipart
 llama_cpp
+slowapi>=0.1.9
+apscheduler

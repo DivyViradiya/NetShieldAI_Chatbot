@@ -3,6 +3,17 @@ import dotenv
 
 dotenv.load_dotenv()
 
+# Visual Logging Colors for the Terminal
+class LogColors:
+    EXTERNAL = "\033[94m" # Blue
+    INTERNAL = "\033[92m" # Green
+    AGENT = "\033[93m"    # Yellow
+    HYBRID = "\033[95m"   # Magenta
+    ROUTER = "\033[96m"   # Cyan
+    INIT = "\033[97m"     # White
+    SUCCESS = "\033[92m"  # Green
+    RESET = "\033[0m"
+
 # Define the base directory for the project.
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 

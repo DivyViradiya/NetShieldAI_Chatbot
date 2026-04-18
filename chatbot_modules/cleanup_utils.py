@@ -7,7 +7,7 @@ import shutil
 from pathlib import Path
 from typing import Optional, Tuple
 
-from pinecone import Pinecone
+
 
 # Import configuration
 from chatbot_modules.config import (
@@ -16,6 +16,7 @@ from chatbot_modules.config import (
     PINECONE_API_KEY,
     UPLOAD_FOLDER
 )
+from chatbot_modules.utils import initialize_pinecone_index
 
 def delete_namespace(session_id: str) -> Tuple[bool, str]:
     """
@@ -27,15 +28,9 @@ def delete_namespace(session_id: str) -> Tuple[bool, str]:
     Returns:
         Tuple of (success: bool, message: str)
     """
-    if not all([PINECONE_API_KEY, PINECONE_ENVIRONMENT, PINECONE_INDEX_NAME]):
-        return False, "Missing Pinecone configuration"
-
     try:
-        # Initialize Pinecone client
-        pc = Pinecone(api_key=PINECONE_API_KEY)
-        
-        # Get the index
-        index = pc.Index(PINECONE_INDEX_NAME)
+        # Get the index (reusing global instance if possible)
+        index = initialize_pinecone_index()
         
         # Delete the specific namespace
         namespace = f"report-{session_id}"

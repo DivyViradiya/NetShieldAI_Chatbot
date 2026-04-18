@@ -872,7 +872,7 @@ def _chunk_killchain_report(parsed_data: Dict[str, Any]) -> List[Dict[str, Any]]
     })
 
     # --- Chunk 4+: Phase 3 - Exploitation (Vulnerabilities) ---
-    for v in vulns:
+    for i, v in enumerate(vulns):
         severity = v.get("severity", "INFO").upper()
         title = v.get("title", "Unknown Issue")
         
@@ -884,9 +884,6 @@ def _chunk_killchain_report(parsed_data: Dict[str, Any]) -> List[Dict[str, Any]]
         evidence = v.get("evidence", "N/A").replace("\n", " ")
         payload = v.get("payload", "")
         
-        # Clean description
-        raw_desc = v.get("description", "").replace("\n", " ")
-        description = (raw_desc[:250] + "...") if len(raw_desc) > 250 else raw_desc
         ml_score = v.get("ml_threat_score", "N/A")
         
         if severity in ["CRITICAL", "HIGH"]:
@@ -954,7 +951,7 @@ def load_report_chunks_and_embeddings(parsed_report_data: Dict[str, Any], report
         raw_chunks_with_metadata = _chunk_api_report(parsed_report_data)
     elif report_type.lower() == "semgrep":
         raw_chunks_with_metadata = _chunk_semgrep_report(parsed_report_data)
-    elif report_type.lower() == "generic_security_report":
+    elif report_type.lower() in ("generic_security_report", "generic_pdf"):
         # First, we need to transform the raw text into the structure expected by _chunk_generic_report
         # or just create a simple chunk list here.
         # Actually, _chunk_generic_report expects a structure from a generic parser.

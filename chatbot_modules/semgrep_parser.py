@@ -99,15 +99,16 @@ def parse_semgrep_report(raw_text: str) -> Dict[str, Any]:
             "file": match.group("file").strip(),
             "line": match.group("line").strip(),
             "description": match.group("msg").strip(),
-            "vulnerable_code": match.group("code").strip(),
-            "suggested_fix": "Review the code segment for security best practices and apply automated remediation where possible."
+            "vulnerable_code": match.group("code").strip()
         })
+
+    real_generated_at = safe_extract(r"GENERATED:?\s*([\d-]+ [\d:]+)", clean_text, default=datetime.now().isoformat())
 
     report = {
         "scan_metadata": {
             "tool": "Semgrep SAST",
             "report_id": str(uuid.uuid4()),
-            "generated_at": datetime.now().isoformat()
+            "generated_at": real_generated_at
         },
         "summary_counts": summary,
         "findings": findings_list

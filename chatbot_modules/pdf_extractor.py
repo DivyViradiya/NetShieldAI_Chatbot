@@ -1,4 +1,4 @@
-import PyPDF2
+import pypdf
 import os
 import logging
 
@@ -17,7 +17,7 @@ def extract_text_from_pdf(pdf_path: str) -> str:
 
     Raises:
         FileNotFoundError: If the PDF file does not exist.
-        PyPDF2.errors.PdfReadError: If the PDF file is corrupted or unreadable.
+        pypdf.errors.PdfReadError: If the PDF file is corrupted or unreadable.
         Exception: For other unexpected errors during extraction.
     """
     if not os.path.exists(pdf_path):
@@ -28,7 +28,7 @@ def extract_text_from_pdf(pdf_path: str) -> str:
     try:
         logger.info(f"Starting text extraction for: {pdf_path}")
         with open(pdf_path, 'rb') as file:
-            reader = PyPDF2.PdfReader(file)
+            reader = pypdf.PdfReader(file)
             
             # Log the number of pages found
             num_pages = len(reader.pages)
@@ -51,9 +51,9 @@ def extract_text_from_pdf(pdf_path: str) -> str:
         
         return extracted_text
 
-    except PyPDF2.errors.PdfReadError as e:
-        logger.error(f"PyPDF2 Error reading {pdf_path}: {e}")
-        raise PyPDF2.errors.PdfReadError(f"Error reading PDF file. It might be corrupted or encrypted.")
+    except pypdf.errors.PdfReadError as e:
+        logger.error(f"pypdf Error reading {pdf_path}: {e}")
+        raise pypdf.errors.PdfReadError(f"Error reading PDF file. It might be corrupted or encrypted.")
     except Exception as e:
         logger.error(f"Unexpected error extracting PDF {pdf_path}: {e}")
         raise Exception(f"An unexpected error occurred during PDF extraction: {e}")

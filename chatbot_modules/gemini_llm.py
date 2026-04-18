@@ -6,22 +6,13 @@ import logging
 import asyncio
 import json
 
-# Visual Logging Colors
-class LogColors:
-    EXTERNAL = "\033[94m" # Blue
-    INTERNAL = "\033[92m" # Green
-    AGENT = "\033[93m"    # Yellow
-    HYBRID = "\033[95m"   # Magenta
-    ROUTER = "\033[96m"   # Cyan
-    INIT = "\033[97m"     # White
-    SUCCESS = "\033[92m"  # Green
-    RESET = "\033[0m"
+from chatbot_modules.config import LogColors
 
 # Setup logging
 logger = logging.getLogger(__name__)
 
-# Load environment variables
-env_path = Path('..') / '.env'
+# Load environment variables (absolute path resolution)
+env_path = Path(__file__).resolve().parent.parent / '.env'
 load_dotenv(dotenv_path=env_path)
 
 def load_model(api_key: str = None, model_name: str = "gemini-2.0-flash", tools: list = None, **kwargs):
@@ -69,15 +60,17 @@ async def generate_response(model, prompt: str, max_tokens: int = 8192, attachme
         if response.candidates and response.candidates[0].content.parts:
             for part in response.candidates[0].content.parts:
                 if part.function_call:
+                    # CANONICAL SCHEMA: {"tool": str, "parameters": dict, "monitor_mode": "terminal"}
                     tool_call = {
-                        "name": part.function_call.name,
-                        "args": dict(part.function_call.args)
+                        "tool": part.function_call.name,
+                        "parameters": dict(part.function_call.args),
+                        "monitor_mode": "terminal"
                     }
                 if part.text:
                     full_text += part.text
 
         return {
-            "text": full_text.strip() if full_text else "Initiating scan...",
+            "text": full_text.strip() if full_text else ("Initiating scan..." if tool_call else ""),
             "tool_call": tool_call
         }
     except Exception as e:
