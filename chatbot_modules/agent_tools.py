@@ -133,6 +133,41 @@ SECURITY_TOOLS = [
                     },
                     "required": ["scanner_type"]
                 }
+            },
+            {
+                "name": "schedule_scan",
+                "description": "Schedule a future or recurring security mission. Use this when the user wants to run a scan at a specific time or interval (e.g., 'every Monday', 'daily at 10 PM').",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "tool_name": {
+                            "type": "string",
+                            "enum": ["nmap_scan", "zap_scan", "ssl_scan", "sql_injection_scan", "packet_sniffer", "api_security_scan", "killchain_audit", "semgrep_sast_scan"],
+                            "description": "The specific scanner tool to schedule."
+                        },
+                        "target": {"type": "string", "description": "The target to scan (IP, URL, or Git URL)."},
+                        "tool_parameters": {
+                            "type": "object",
+                            "description": "Key-value pairs of scanner-specific parameters (e.g., scan_type, timing, scan_mode)."
+                        },
+                        "schedule_type": {
+                            "type": "string",
+                            "enum": ["daily", "weekly", "monthly", "once", "periodic"],
+                            "description": "Frequency of the mission."
+                        },
+                        "hour": {"type": "integer", "description": "Hour of the day (0-23) for daily/weekly/monthly schedules."},
+                        "minute": {"type": "integer", "description": "Minute of the hour (0-59)."},
+                        "day_of_week": {
+                            "type": "string",
+                            "enum": ["mon", "tue", "wed", "thu", "fri", "sat", "sun"],
+                            "description": "Day of the week for weekly schedules."
+                        },
+                        "day_of_month": {"type": "string", "description": "Day(s) of the month (e.g., '1', '1,15') for monthly schedules."},
+                        "interval_minutes": {"type": "integer", "description": "Interval in minutes for periodic schedules."},
+                        "one_shot_at": {"type": "string", "description": "ISO format datetime for 'once' schedules (e.g., '2026-04-20T10:00:00')."}
+                    },
+                    "required": ["tool_name", "target", "schedule_type"]
+                }
             }
         ]
     }
