@@ -9,3 +9,5 @@ __pycache__/
 *.db-journal
 uploads/
 .gemini/
+CWE_Profiles/
+scratch/
