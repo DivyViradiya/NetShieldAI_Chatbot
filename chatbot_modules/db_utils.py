@@ -74,6 +74,18 @@ def init_db():
         )
     ''')
 
+    # Table: User Memory Rules (Cross-Session Agentic Memory)
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS user_memory_rules (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id TEXT NOT NULL,
+            rule_type TEXT NOT NULL,
+            content TEXT NOT NULL,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    ''')
+    cursor.execute('CREATE INDEX IF NOT EXISTS idx_mem_user_id ON user_memory_rules(user_id)')
+
     conn.commit()
 
     # --- MIGRATION: Add 'attachments' column if it doesn't exist ---
@@ -321,6 +333,7 @@ def clear_user_data(user_id: str):
         cursor.execute("DELETE FROM session_graphs WHERE session_id = ?", (sid,))
         
     cursor.execute("DELETE FROM user_sessions WHERE user_id = ?", (user_id,))
+    cursor.execute("DELETE FROM user_memory_rules WHERE user_id = ?", (user_id,))
     conn.commit()
 
 def get_all_user_sessions(user_id: str) -> List[Dict]:
@@ -369,3 +382,35 @@ def get_stale_sessions(days_old: int = 7) -> List[str]:
     cursor.execute("SELECT session_id FROM user_sessions WHERE last_active < ?", (threshold_date,))
     rows = cursor.fetchall()
     return [row[0] for row in rows]
+
+# --- Agentic Memory Management ---
+
+def add_user_memory_rule(user_id: str, rule_type: str, content: str):
+    """Adds a structured declarative memory rule (e.g., target exclusion) for a user."""
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    cursor.execute('''
+        INSERT INTO user_memory_rules (user_id, rule_type, content)
+        VALUES (?, ?, ?)
+    ''', (user_id, rule_type, content))
+    conn.commit()
+
+def get_user_memory_rules(user_id: str) -> List[Dict]:
+    """Retrieves all structured memory rules for a user."""
+    conn = get_db_connection()
+    conn.row_factory = sqlite3.Row
+    cursor = conn.cursor()
+    cursor.execute('''
+        SELECT id, rule_type, content, created_at FROM user_memory_rules
+        WHERE user_id = ?
+        ORDER BY created_at ASC
+    ''', (user_id,))
+    rows = cursor.fetchall()
+    return [dict(row) for row in rows]
+
+def clear_user_memory_rules(user_id: str):
+    """Deletes all persistent structured memory rules for a user."""
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    cursor.execute("DELETE FROM user_memory_rules WHERE user_id = ?", (user_id,))
+    conn.commit()

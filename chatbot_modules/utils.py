@@ -1069,3 +1069,77 @@ def delete_report_namespace(report_namespace: str):
     except Exception as e:
         logger.error(f"Error deleting Pinecone namespace '{report_namespace}': {e}")
 
+# --- Agentic Memory (Pinecone) ---
+
+def upsert_user_memory(user_id: str, texts: List[str]):
+    """
+    Embeds and stores semantic memory facts for a specific user.
+    """
+    if not texts:
+        return
+        
+    embedding_model = load_embedding_model()
+    pinecone_index = initialize_pinecone_index()
+    namespace = f"user_memory_{user_id}"
+    
+    vectors_to_upsert = []
+    for i, text in enumerate(texts):
+        embedding = embedding_model.encode(text).tolist()
+        vector_id = f"mem_{datetime.datetime.now().strftime('%Y%m%d%H%M%S')}_{i}"
+        vectors_to_upsert.append({
+            "id": vector_id,
+            "values": embedding,
+            "metadata": {"text": text, "timestamp": datetime.datetime.now().isoformat(), "source": "agentic_memory"}
+        })
+        
+    try:
+        pinecone_index.upsert(vectors=vectors_to_upsert, namespace=namespace)
+        logger.info(f"Upserted {len(vectors_to_upsert)} memory chunks to namespace {namespace}.")
+    except Exception as e:
+        logger.error(f"Error upserting user memory: {e}")
+
+def retrieve_user_memory(query: str, user_id: str, top_k: int = 4) -> str:
+    """
+    Retrieves semantic memory context for a specific user.
+    """
+    embedding_model = load_embedding_model()
+    pinecone_index = initialize_pinecone_index()
+    namespace = f"user_memory_{user_id}"
+    
+    try:
+        query_embedding = embedding_model.encode(query).tolist()
+        response = pinecone_index.query(
+            vector=query_embedding,
+            top_k=top_k,
+            include_metadata=True,
+            namespace=namespace
+        )
+        
+        context_parts = []
+        for match in response.matches:
+            if match.metadata and "text" in match.metadata:
+                # Ensure semantic relevance before injecting to avoid hallucination
+                if match.score > 0.35:
+                    context_parts.append(match.metadata["text"])
+                    
+        if context_parts:
+            logger.info(f"{LogColors.AGENT}[MEMORY] Retrieved {len(context_parts)} semantic memories.{LogColors.RESET}")
+            return "\n\nRelevant Past User Messages & Memory Context:\n" + "\n- ".join(["", *context_parts])
+        return ""
+    except Exception as e:
+        logger.warning(f"Failed to query user memory namespace {namespace} (maybe empty): {e}")
+        return ""
+
+def clear_user_pinecone_memory(user_id: str):
+    """
+    Deletes the semantic memory namespace for a specific user.
+    """
+    pinecone_index = initialize_pinecone_index()
+    namespace = f"user_memory_{user_id}"
+    try:
+        pinecone_index.delete(delete_all=True, namespace=namespace)
+        logger.info(f"Deleted Pinecone memory namespace: {namespace}")
+    except Exception as e:
+        logger.warning(f"Error deleting Pinecone namespace {namespace}: {e}")
+
+

@@ -122,6 +122,10 @@ class DeleteAllSessionsRequest(BaseModel):
     """New model for bulk user cleanup."""
     user_id: str
 
+class ClearMemoryRequest(BaseModel):
+    """Model for clearing agentic long-term memory."""
+    user_id: str
+
 # --- SECURITY: PROMPT INJECTION SANITIZATION ---
 INJECTION_PATTERNS = [r'ignore (all )?previous', r'system:\s*you are now', r'forget (everything|above)']
 
@@ -801,6 +805,70 @@ async def get_session_graph(session_id: str):
             content={"success": False, "message": "Failed to retrieve graph data."}
         )
 
+# --- NEW: AGENTIC MEMORY EXTRACTION ---
+async def extract_and_store_memory(user_id: str, message_text: str, llm_mode: str = None):
+    """
+    Background worker that runs a lightweight LLM call to extract semantic rules
+    and facts from the user's message, storing them in SQL and Pinecone.
+    """
+    try:
+        if "SCAN_COMPLETE_SIGNAL" in message_text or len(message_text.strip()) < 5:
+            return
+
+        # Use the provided llm_mode, falling back to global default
+        mode = llm_mode if llm_mode in config.SUPPORTED_LLM_MODES else config.DEFAULT_LLM_MODE
+        instance = _llm_instances_global.get(mode) or _llm_instances_global.get(config.DEFAULT_LLM_MODE) or _llm_instances_global.get("local")
+        gen_func = _llm_generate_funcs_global.get(mode) or _llm_generate_funcs_global.get(config.DEFAULT_LLM_MODE) or _llm_generate_funcs_global.get("local")
+        
+        if not instance or not gen_func:
+            return
+
+        prompt = (
+            "System: You are an internal memory extraction subsystem. Analyze the following user message.\n"
+            "If the user states a permanent fact about their infrastructure (e.g. '192.168.1.10 is the prod DB'), "
+            "a long-term preference (e.g. 'I prefer concise answers'), or a firm exclusion rule (e.g. 'Never scan 10.0.0.5'), "
+            "extract it. Otherwise, output 'NO_MEMORY'.\n"
+            "Format your output ONLY as a strict JSON array of objects with keys: \n"
+            "'type' (either 'exclusion', 'preference', or 'fact') AND 'content' (the extracted detail).\n"
+            f"User Message: {message_text}\n"
+        )
+
+        result = await execute_with_retry(gen_func, instance, prompt, max_tokens=150)
+        output = result.get("text", "").strip()
+        
+        if "NO_MEMORY" in output or not output:
+            return
+
+        try:
+            # Clean up markdown code blocks if any
+            clean_output = output.strip('` \n')
+            if clean_output.lower().startswith("json"):
+                clean_output = clean_output[4:]
+            
+            items = json.loads(clean_output)
+            pinecone_texts = []
+            
+            for item in items:
+                rtype = item.get("type", "fact")
+                content = item.get("content", "")
+                if content:
+                    if rtype in ["exclusion", "preference"]:
+                        await run_in_threadpool(db_utils.add_user_memory_rule, user_id, rtype, content)
+                        logger.info(f"Background: Stored hard {rtype} rule for user {user_id}")
+                    else:
+                        pinecone_texts.append(content)
+            
+            if pinecone_texts:
+                from chatbot_modules.utils import upsert_user_memory
+                await run_in_threadpool(upsert_user_memory, user_id, pinecone_texts)
+                logger.info(f"Background: Upserted {len(pinecone_texts)} memory facts for user {user_id}")
+
+        except json.JSONDecodeError:
+            logger.warning(f"Memory extraction failed to parse JSON: {output}")
+
+    except Exception as e:
+        logger.error(f"Error in background memory extraction: {e}")
+
 # --- BACKGROUND TASK HELPERS ---
 async def run_post_upload_processing(session_id: str, user_id: str, parsed_data: Dict[str, Any], report_type: str, original_filename: str, llm_mode: str):
     """
@@ -1039,6 +1107,7 @@ async def upload_report(
         if is_temporary_file and target_file_to_process and os.path.exists(target_file_to_process):
             os.remove(target_file_to_process)
             logger.info(f"Cleaned up temporary upload: {target_file_to_process}")
+
 @app.post("/chat")
 async def chat(chat_message: ChatMessage):
     """Handles user chat messages and returns AI responses (BLOCKING MODE)."""
@@ -1135,23 +1204,24 @@ async def chat(chat_message: ChatMessage):
     orchestrator_prompt = (
         "System: You are the NetShieldAI Security Orchestrator. Your goal is to guide the user through security audits and analyze technical telemetry.\n"
         "1. Identify Intent: Look for scan requests (Nmap, ZAP, SSL, etc.).\n"
-        "2. Terminal Protocol: When initiating a scan, inform the user: 'Deploying module. You can monitor the live telemetry synchronization below. I will Lightspeed the data upon completion.'\n"
+        "2. Terminal Protocol: ONLY WHEN INITIATING an actual scan (triggering a tool), inform the user: 'Deploying module. You can monitor the live telemetry synchronization below. I will Lightspeed the data upon completion.' DO NOT say this when asking for input or settings.\n"
         "3. Scan Options & Information Structure: When listing scans or providing details, use the following structure for each tool:\n"
         "   - **Tool Name**\n"
         "   - **Description**: Concise explanation of what the scan does.\n"
         "   - **Target Requirements**: Precise target needed (e.g., IP, URL, Host).\n"
         "   - **Configuration Options**: List of available parameters (e.g., Scan Type, Duration, Profile).\n"
         "4. Tool Requirements Reference:\n"
-        "   - Nmap Scan: Requires 'target_ip'. Options: Scan Type (default, os, aggressive, etc.), Timing (0-5).\n"
-        "   - ZAP Scan: Requires 'target_url'. Options: Scan Type (Quick, Full).\n"
+        "   - Nmap Scan: Requires 'target_ip'. Options: Protocol (TCP/UDP), Scan Type (default, os, aggressive, vuln, etc.), Timing (0-5).\n"
+        "   - ZAP Scan: Requires 'target_url'. Options: Scan Mode (Quick, Full, Deep), AJAX Spider (true/false).\n"
         "   - SSL/TLS Scan: Requires 'target_host'.\n"
-        "   - SQL Injection Scan: Requires 'target_url'. Options: Mode (quick, full, deep).\n"
+        "   - SQL Injection Scan: Requires 'target_url'. Options: Scan Mode (quick, full, deep), Risk Level (1-3), Scan Level (1-5), Check WAF (true/false).\n"
         "   - Packet Sniffer: Requires 'target_ip'. Options: Duration, Max Packets.\n"
-        "   - API Security Scan: Requires 'target_url' and 'definition_url' (Swagger).\n"
-        "   - Kill Chain Audit: Requires 'target'. Options: Profile (full_audit, stealth, recon_only).\n"
+        "   - API Security Scan: Requires 'target_url' and 'definition_url' (Swagger). Options: Auth Token.\n"
+        "   - Kill Chain Audit: Requires 'target'. Options: Profile (Recon Only, Network Audit, Web Audit, Full Scan), Aggression (Normal, Stealth, Attack).\n"
         "   - Semgrep SAST Scan: Requires 'git_url'.\n"
         "5. MANDATORY: ALWAYS ask the user for the specific target and any required/optional configurations before initiating a scan. If the user only says 'run a scan', do NOT guess parameters. Explicitly list the requirements and configurations for the requested tool and wait for their reply before triggering the scan.\n"
-        "6. Safety: Prohibit scanning 'localhost' or loopback addresses.\n"
+        "6. Formatting: Use separate paragraphs for your instructions and questions to the user. Do not clump information together.\n"
+        "7. Safety: Prohibit scanning 'localhost' or loopback addresses.\n"
         "7. Synchronization: When you receive the trigger '[ANALYSIS_TRIGGER]', analyze the summary in 'SYSTEM_NOTIFICATION' and provide a professional breakdown.\n"
         "8. Scheduling Missions: When the user wants to run a scan in the future or on a recurring basis, follow the **SCHEDULING PROTOCOL**:\n"
         "   - **Acknowledge**: Inform the user you can orchestrate the persistence logic for their audit.\n"
@@ -1161,7 +1231,7 @@ async def chat(chat_message: ChatMessage):
         "   - **Trigger**: Only call `schedule_scan` once user provides Frequency, Time, Tool, and Target.\n"
         "   - **Confirmation**: Inform them: 'Mission scheduled. I have orchestrated the persistence parameters for this audit.'\n"
         "9. Scan Consultation: When the user wants to perform a scan or asks for scan help, follow the **SCAN PROTOCOL**:\n"
-        "   - **Acknowledge**: Inform the user you can help orchestrate the security grid for their audit.\n"
+        "   - **Acknowledge**: Acknowledge the request distinctly by outputting EXACTLY THIS marker on its own line: `[GRID_INTRO]`.\n"
         "   - **Tool Selection**: Output the tag `[SCAN_PRESETS]` on a new line. Then, list the 8 scanners properly segregated into these 3 categories using bold headers and bulleted lists:\n"
         "      - **Network Infrastructure**: Nmap Scan, Packet Sniffer.\n"
         "      - **Web Application Scanners**: ZAP Scan, SQL Injection Scan, API Security Scan.\n"
@@ -1172,8 +1242,32 @@ async def chat(chat_message: ChatMessage):
         "        - **Audit Scope**: Detailed technical purpose.\n"
         "        - **Target Requirements**: Mandatory parameters.\n"
         "        - **Operational Config**: Available modes, timings, and flags.\n"
+        "10. Smart Follow-ups: At the very end of your response in standard chat, proactively suggest exactly one logical next step or action based on the findings or past memory. Provide it on a new line formatted exactly as: `__SUGGESTION__: <actionable text>`.\n"
+        "11. Memory Acknowledgment: If the user provides a permanent fact, rule, or preference in their message (e.g. 'Never scan 10.0.0.1'), you MUST first acknowledge it in a brief, professional sentence (e.g., 'I have noted that restriction for all future scans.'), and ONLY THEN output EXACTLY: `[MEMORY_UPDATED]` at the very end of your response.\n"
     )
     llm_prompt_content = orchestrator_prompt + system_instruction
+
+    # --- PHASE 3: CONTEXT ROUTING (MEMORY INJECTION) ---
+    is_objective_analysis = "[ANALYSIS_TRIGGER]" in user_question or "SCAN_COMPLETE_SIGNAL" in user_question
+    if not is_incognito and not is_objective_analysis:
+        logger.info(f"Injecting long-term memory for user {user_id}")
+        user_memory_context = ""
+        # 1. Hard Rules (SQLite)
+        rules = db_utils.get_user_memory_rules(user_id)
+        if rules:
+            rule_texts = [f"[{r['rule_type'].upper()}] {r['content']}" for r in rules]
+            user_memory_context += f"\n--- FIRM USER RULES & GUARDRAILS ---\nThese rules MUST be followed:\n" + "\n".join(rule_texts) + "\n------------------------------------\n"
+        
+        # 2. Semantic Facts (Pinecone)
+        from chatbot_modules.utils import retrieve_user_memory
+        semantic_memory = await run_in_threadpool(retrieve_user_memory, user_question, user_id)
+        if semantic_memory:
+            user_memory_context += semantic_memory
+            
+        llm_prompt_content += user_memory_context
+    elif is_objective_analysis:
+        logger.info("Objective analysis requested. Bypassing Agentic Memory to ensure unbiased reporting.")
+
     rag_context = ""
     # Determine if Internal RAG is needed
     if current_parsed_report and is_report_specific_question_web(user_question, current_parsed_report):
@@ -1406,6 +1500,7 @@ def parse_local_llm_action(text: str) -> Optional[dict]:
 @limiter.limit("30/minute")
 async def chat_stream(
     request: Request,
+    background_tasks: BackgroundTasks,
     message: Optional[str] = Form(None),
     session_id: Optional[str] = Form(None),
     user_id: Optional[str] = Form(None),
@@ -1438,6 +1533,10 @@ async def chat_stream(
         llm_mode = llm_mode if llm_mode in config.SUPPORTED_LLM_MODES else config.DEFAULT_LLM_MODE
     if not user_id:
         raise HTTPException(status_code=400, detail="user_id is required")
+
+    # --- PHASE 2: Background Memory Extraction ---
+    if not is_incognito and user_question:
+        background_tasks.add_task(extract_and_store_memory, user_id, user_question, llm_mode)
 
     # --- SECURITY: Sanitize Input ---
     user_question = sanitize_input(user_question)
@@ -1516,22 +1615,24 @@ async def chat_stream(
     orchestrator_prompt = (
         "System: You are the NetShieldAI Security Orchestrator. Your goal is to guide the user through security audits and analyze technical telemetry.\n"
         "1. Identify Intent: Look for scan requests (Nmap, ZAP, SSL, etc.).\n"
-        "2. Terminal Protocol: When initiating a scan, inform the user: 'Deploying module. You can monitor the live telemetry synchronization below. I will Lightspeed the data upon completion.'\n"
+        "2. Terminal Protocol: ONLY WHEN INITIATING an actual scan (triggering a tool), inform the user: 'Deploying module. You can monitor the live telemetry synchronization below. I will Lightspeed the data upon completion.' DO NOT say this when asking for input or settings.\n"
         "3. Scan Options & Information Structure: When listing scans or providing details, use the following structure for each tool:\n"
         "   - **Tool Name**\n"
         "   - **Description**: Concise explanation of what the scan does.\n"
         "   - **Target Requirements**: Precise target needed (e.g., IP, URL, Host).\n"
         "   - **Configuration Options**: List of available parameters (e.g., Scan Type, Duration, Profile).\n"
         "4. Tool Requirements Reference:\n"
-        "   - Nmap Scan: Requires 'target_ip'. Options: Scan Type (default, os, aggressive, etc.), Timing (0-5).\n"
-        "   - ZAP Scan: Requires 'target_url'. Options: Scan Type (Quick, Full).\n"
+        "   - Nmap Scan: Requires 'target_ip'. Options: Protocol (TCP/UDP), Scan Type (default, os, aggressive, vuln, etc.), Timing (0-5).\n"
+        "   - ZAP Scan: Requires 'target_url'. Options: Scan Mode (Quick, Full, Deep), AJAX Spider (true/false).\n"
         "   - SSL/TLS Scan: Requires 'target_host'.\n"
-        "   - SQL Injection Scan: Requires 'target_url'. Options: Mode (quick, full, deep).\n"
+        "   - SQL Injection Scan: Requires 'target_url'. Options: Scan Mode (quick, full, deep), Risk Level (1-3), Scan Level (1-5), Check WAF (true/false).\n"
         "   - Packet Sniffer: Requires 'target_ip'. Options: Duration, Max Packets.\n"
-        "   - API Security Scan: Requires 'target_url' and 'definition_url' (Swagger).\n"
-        "   - Kill Chain Audit: Requires 'target'. Options: Profile (full_audit, stealth, recon_only).\n"
+        "   - API Security Scan: Requires 'target_url' and 'definition_url' (Swagger). Options: Auth Token.\n"
+        "   - Kill Chain Audit: Requires 'target'. Options: Profile (Recon Only, Network Audit, Web Audit, Full Scan), Aggression (Normal, Stealth, Attack).\n"
         "   - Semgrep SAST Scan: Requires 'git_url'.\n"
-        "5. Safety: Prohibit scanning 'localhost' or loopback addresses.\n"
+        "5. MANDATORY: ALWAYS ask the user for the specific target and any required/optional configurations before initiating a scan. If the user only says 'run a scan', do NOT guess parameters. Explicitly list the requirements and configurations for the requested tool and wait for their reply before triggering the scan.\n"
+        "6. Formatting: Use separate paragraphs for your instructions and questions to the user. Do not clump information together.\n"
+        "7. Safety: Prohibit scanning 'localhost' or loopback addresses.\n"
         "6. Synchronization: When you receive the trigger '[ANALYSIS_TRIGGER]', analyze the summary in 'SYSTEM_NOTIFICATION' and provide a professional breakdown.\n"
         "7. Scheduling Missions: When the user wants to run a scan in the future or on a recurring basis, follow the **SCHEDULING PROTOCOL**:\n"
         "   - **Acknowledge**: Inform the user you can orchestrate the persistence logic for their audit.\n"
@@ -1541,19 +1642,38 @@ async def chat_stream(
         "   - **Trigger**: Only call `schedule_scan` once user provides Frequency, Time, Tool, and Target.\n"
         "   - **Confirmation**: Inform them: 'Mission scheduled. I have orchestrated the persistence parameters for this audit.'\n"
         "8. Scan Consultation: When the user wants to perform a scan or asks for scan help, follow the **SCAN PROTOCOL**:\n"
-        "   - **Acknowledge**: Inform the user you can help orchestrate the security grid for their audit.\n"
-        "   - **Tool Selection**: Output the tag `[SCAN_PRESETS]` on a new line. Then, list the 8 scanners properly segregated into these 3 categories using bold headers and bulleted lists:\n"
-        "      - **Network Infrastructure**: Nmap Scan, Packet Sniffer.\n"
-        "      - **Web Application Scanners**: ZAP Scan, SQL Injection Scan, API Security Scan.\n"
-        "      - **Audit & Verification**: SSL/TLS Scan, Kill Chain Audit, Semgrep SAST Scan.\n"
-        "      Format each group as: `**Category Name**` followed immediately by its bulleted list: `- Name: Description`.\n"
+        "   - **Acknowledge**: Acknowledge the request distinctly by outputting EXACTLY THIS marker on its own line: `[GRID_INTRO]`.\n"
+        "   - **Tool Selection**: Output exactly `[SCAN_PRESETS]` on a new line. Then, list all 8 scanners as a flat bulleted list (Nmap Scan, ZAP Scan, SSL/TLS Scan, SQL Injection Scan, Packet Sniffer, API Security Scan, Kill Chain Audit, Semgrep SAST Scan). Format: `- Tool Name: Description`.\n"
         "   - **Consultation**: Below the card grid, provide a detailed textual reference with the header `### 🛡️ Tactical Scanner Configuration`. For each tool, use the following structured bullet-point format:\n"
         "      - **Tool Name**\n"
         "        - **Audit Scope**: Detailed technical purpose.\n"
         "        - **Target Requirements**: Mandatory parameters.\n"
         "        - **Operational Config**: Available modes, timings, and flags.\n"
+        "9. Smart Follow-ups: At the very end of your response in standard chat, proactively suggest exactly one logical next step. YOU MUST phrase this suggestion from the USER'S perspective (e.g. 'Analyze the Nmap results' instead of 'Should I analyze the results?'). Format: `__SUGGESTION__: <user actionable intent>`.\n"
+        "10. Memory Acknowledgment: If the user provides a permanent fact, rule, or preference in their message (e.g. 'Never scan 10.0.0.1'), you MUST first acknowledge it in a brief, professional sentence (e.g., 'I have noted that restriction for all future scans.'), and ONLY THEN output EXACTLY: `[MEMORY_UPDATED]` at the very end of your response.\n"
     )
     llm_prompt_content = orchestrator_prompt + system_instruction
+
+    # --- PHASE 3: CONTEXT ROUTING (MEMORY INJECTION) ---
+    is_objective_analysis = "[ANALYSIS_TRIGGER]" in user_question or "SCAN_COMPLETE_SIGNAL" in user_question
+    if not is_incognito and not is_objective_analysis:
+        logger.info(f"Injecting long-term memory for user {user_id}")
+        user_memory_context = ""
+        # 1. Hard Rules (SQLite)
+        rules = db_utils.get_user_memory_rules(user_id)
+        if rules:
+            rule_texts = [f"[{r['rule_type'].upper()}] {r['content']}" for r in rules]
+            user_memory_context += f"\n--- FIRM USER RULES & GUARDRAILS ---\nThese rules MUST be followed:\n" + "\n".join(rule_texts) + "\n------------------------------------\n"
+        
+        # 2. Semantic Facts (Pinecone)
+        from chatbot_modules.utils import retrieve_user_memory
+        semantic_memory = await run_in_threadpool(retrieve_user_memory, user_question, user_id)
+        if semantic_memory:
+            user_memory_context += semantic_memory
+            
+        llm_prompt_content += user_memory_context
+    elif is_objective_analysis:
+        logger.info("Objective analysis requested. Bypassing Agentic Memory to ensure unbiased reporting.")
 
     # RAG Logic
     rag_context = ""
@@ -1677,13 +1797,14 @@ async def chat_stream(
             db_utils.add_message(session_id, "assistant", content_to_save)
 
     headers = {"X-Session-ID": session_id}
-    return StreamingResponse(response_generator(), media_type="text/plain", headers=headers)
+    return StreamingResponse(response_generator(), media_type="text/plain", headers=headers, background=background_tasks)
 
 # --- Unified Chat Endpoint ---
 @app.post("/chat")
 @limiter.limit("30/minute")
 async def chat(
     request: Request,
+    background_tasks: BackgroundTasks,
     message: Optional[str] = Form(None),
     session_id: Optional[str] = Form(None),
     user_id: Optional[str] = Form(None),
@@ -1715,6 +1836,10 @@ async def chat(
 
     if not user_id:
         raise HTTPException(status_code=400, detail="user_id is required")
+
+    # --- PHASE 2: Background Memory Extraction ---
+    if not is_incognito and user_question:
+        background_tasks.add_task(extract_and_store_memory, user_id, user_question, llm_mode)
 
     # --- SECURITY: Sanitize Input ---
     user_question = sanitize_input(user_question)
@@ -1824,6 +1949,24 @@ async def delete_all_sessions_endpoint(request: DeleteAllSessionsRequest):
         delete_namespace(f"report-{sid}")
         clear_uploaded_files(sid)
     return JSONResponse(content={'success': True})
+
+@app.post("/clear_memory")
+async def clear_memory_endpoint(request: ClearMemoryRequest):
+    """Wipes the agentic long-term memory (Rules & Facts) for a user."""
+    user_id = request.user_id
+    logger.info(f"Clearing Agentic Memory for user: {user_id}")
+    try:
+        # 1. Clear Pinecone semantic memory
+        from chatbot_modules.utils import clear_user_pinecone_memory
+        await run_in_threadpool(clear_user_pinecone_memory, user_id)
+        
+        # 2. Clear SQLite hard rules
+        await run_in_threadpool(db_utils.clear_user_memory_rules, user_id)
+        
+        return JSONResponse(content={'success': True, 'message': 'Memory cleared successfully'})
+    except Exception as e:
+        logger.error(f"Error clearing memory for user {user_id}: {e}")
+        return JSONResponse(status_code=500, content={'success': False, 'message': str(e)})
 
 # --- NEW ENDPOINTS FOR SESSION MANAGEMENT ---
 
