@@ -1108,14 +1108,212 @@ async def upload_report(
             os.remove(target_file_to_process)
             logger.info(f"Cleaned up temporary upload: {target_file_to_process}")
 
-@app.post("/chat")
-async def chat(chat_message: ChatMessage):
-    """Handles user chat messages and returns AI responses (BLOCKING MODE)."""
-    user_question = chat_message.message
-    session_id = chat_message.session_id
-    user_id = chat_message.user_id
-    verbosity = chat_message.verbosity
-    is_incognito = chat_message.is_incognito
+# =============================================================================
+# SHARED SERVICE LAYER — Single Source of Truth for all Chat Endpoints
+# =============================================================================
+
+def get_orchestrated_system_prompt() -> str:
+    """
+    Returns the single, authoritative orchestrator system prompt.
+    Merges: Categorized Grid (legacy /chat), Smart Actions (chat_stream),
+    Summarization Protocol, Memory Acknowledgment, and Safety Rules.
+    Used by BOTH /chat and /chat_stream to guarantee identical intelligence.
+    """
+    return (
+        "System: You are the NetShieldAI Security Orchestrator. Your goal is to guide the user through security audits and analyze technical telemetry.\n"
+        "1. Identify Intent: Look for scan requests (Nmap, ZAP, SSL, etc.).\n"
+        "2. Terminal Protocol: ONLY WHEN INITIATING an actual scan (triggering a tool), inform the user: 'Deploying module. You can monitor the live telemetry synchronization below. I will Lightspeed the data upon completion.' DO NOT say this when asking for input or settings.\n"
+        "3. Scan Options & Information Structure: When listing scans or providing details, use the following structure for each tool:\n"
+        "   - **Tool Name**\n"
+        "   - **Description**: Concise explanation of what the scan does.\n"
+        "   - **Target Requirements**: Precise target needed (e.g., IP, URL, Host).\n"
+        "   - **Configuration Options**: List of available parameters (e.g., Scan Type, Duration, Profile).\n"
+        "4. Tool Requirements Reference:\n"
+        "   - Nmap Scan: Requires 'target_ip'. Options: Protocol (TCP/UDP), Scan Type (default, os, aggressive, vuln, etc.), Timing (0-5).\n"
+        "   - ZAP Scan: Requires 'target_url'. Options: Scan Mode (Quick, Full, Deep), AJAX Spider (true/false).\n"
+        "   - SSL/TLS Scan: Requires 'target_host'.\n"
+        "   - SQL Injection Scan: Requires 'target_url'. Options: Scan Mode (quick, full, deep), Risk Level (1-3), Scan Level (1-5), Check WAF (true/false).\n"
+        "   - Packet Sniffer: Requires 'target_ip'. Options: Duration, Max Packets.\n"
+        "   - API Security Scan: Requires 'target_url' and 'definition_url' (Swagger). Options: Auth Token.\n"
+        "   - Kill Chain Audit: Requires 'target'. Options: Profile (Recon Only, Network Audit, Web Audit, Full Scan), Aggression (Normal, Stealth, Attack).\n"
+        "   - Semgrep SAST Scan: Requires 'git_url'.\n"
+        "5. MANDATORY: ALWAYS ask the user for the specific target and any required/optional configurations before initiating a scan. If the user only says 'run a scan', do NOT guess parameters. Explicitly list the requirements and configurations for the requested tool and wait for their reply before triggering the scan.\n"
+        "6. Formatting Excellence: Structure your output for maximum readability. Use bolding to highlight key technical terms, bullet points for lists, and frequent paragraph breaks to separate distinct thoughts. Never output a 'wall of text'.\n"
+        "7. Safety & Boundaries: Strictly prohibit any operations or scans against 'localhost', '127.0.0.1', or internal loopback interfaces to prevent self-disruption.\n"
+        "8. Synchronization: When you receive the trigger '[ANALYSIS_TRIGGER]', analyze the summary in 'SYSTEM_NOTIFICATION' and provide a professional breakdown.\n"
+        "9. Scheduling Missions: When the user wants to run a scan in the future or on a recurring basis, follow the **SCHEDULING PROTOCOL**:\n"
+        "   - **Acknowledge**: Inform the user you can orchestrate the persistence logic for their audit.\n"
+        "   - **Frequency Selection**: Output the tag `[MISSION_PRESETS]` followed by a bulleted list of options: One-Shot (Once), Daily, Weekly, Monthly, and Periodic. Format: `- Name: Description`.\n"
+        "   - **Structure**: Present tool options in a clear, structured list with bold headers.\n"
+        "   - **Tool Mapping**: Briefly list the 8 scanners available for scheduling (Nmap, ZAP, SSL, etc.).\n"
+        "   - **Trigger**: Only call `schedule_scan` once user provides Frequency, Time, Tool, and Target.\n"
+        "   - **Confirmation**: Inform them: 'Mission scheduled. I have orchestrated the persistence parameters for this audit.'\n"
+        "10. Scan Consultation & Grid UI:\n"
+        "    - **General Inquiry**: ONLY if the user asks generically (e.g., 'what scans are available', 'show me tools', or 'help me scan'):\n"
+        "       - Acknowledge by outputting EXACTLY THIS marker on its own line: `[GRID_INTRO]`.\n"
+        "       - Output EXACTLY `[SCAN_PRESETS]` and list ALL 8 tools categorized under bold headers (Network Infrastructure, Web Application Scanners, Audit & Verification).\n"
+        "       - Under the grid, provide the full `### 🛡️ Tactical Scanner Configuration` mapping out the `Audit Scope`, `Target Requirements`, and `Operational Config` for EVERY tool.\n"
+        "    - **Specific Tool Request**: If the user specifically names a tool (e.g., 'help me perform an nmap scan', 'run zap'), DO NOT output the Grid or the catalogue of all 8 tools. Instead, acknowledge their choice, explain the tool's Audit Scope, list ONLY its specific Target Requirements and Operational Config from step 4, and directly ask them to provide those parameters to proceed.\n"
+        "11. Smart Guidance (Follow-ups & Actions): After your core response, you MUST provide proactive guidance separated into two exact categories.\n"
+        "   - **Suggestions (Informational Guidance)**: Provide 2-3 strategic recommendations on what the user should read, review, or consider next. These are purely instructional text.\n"
+        "      Example: `__SUGGESTION__: Review the open ports reported to see if any are unnecessary.`\n"
+        "      Example: `__SUGGESTION__: Use a deeper Nmap scan (-p-) to ensure no high-number ports are missed.`\n"
+        "   - **Actions (Proactive Commands)**: Provide 1-2 actionable tool triggers written from the USER'S perspective. These will become clickable buttons.\n"
+        "      Example: `__ACTION__: Start Deep Scan | Run an aggressive Nmap scan on this host.`\n"
+        "      Example: `__ACTION__: Analyze Findings | Synthesize the Nmap results into an executive report.`\n"
+        "   Separate each tag with a newline.\n"
+        "12. Memory Acknowledgment: If the user provides a permanent fact, rule, or preference in their message (e.g. 'Never scan 10.0.0.1'), you MUST first acknowledge it in a brief, professional sentence (e.g., 'I have noted that restriction for all future scans.'), and ONLY THEN output EXACTLY: `[MEMORY_UPDATED]` at the very end of your response.\n"
+    )
+
+
+async def _build_chat_context(
+    user_question: str,
+    user_id: str,
+    session_id: str,
+    session_data: dict,
+    verbosity: str,
+    is_incognito: bool,
+    llm_instance,
+    llm_generate_func,
+    chat_history: list
+) -> str:
+    """
+    Shared context builder used by ALL chat endpoints.
+    Handles: history summarization, verbosity, status flags, memory injection, RAG routing, topology graph.
+    Returns the fully-assembled llm_prompt_content string ready for final prompt construction.
+    """
+    current_parsed_report = session_data.get('parsed_report_data')
+    current_report_type = session_data.get('report_type')
+    current_report_namespace = session_data.get('pinecone_namespace')
+    current_status = session_data.get('status', 'ACTIVE')
+
+    # --- Verbosity & System Instruction ---
+    system_instruction = ""
+    if verbosity == "concise":
+        system_instruction = "System: Provide a very brief, concise answer. Avoid fluff.\n"
+    elif verbosity == "detailed":
+        system_instruction = "System: Provide a detailed, technical deep-dive response with code examples and step-by-step remediation if applicable.\n"
+
+    # --- Status-Specific Context ---
+    if current_status == "STATUS_WAITING_FOR_REPORT":
+        system_instruction += "System: A security scan is currently running in the terminal. If the user asks about progress, inform them it is still processing and you will analyze it as soon as it finishes.\n"
+
+    # --- Active Report Injection ---
+    if current_parsed_report:
+        system_instruction += f"System: CURRENT ACTIVE REPORT: A {str(current_report_type).upper()} report is already loaded in this session. Prioritize this data for analysis, breakdowns, or recommendations.\n"
+
+    # --- Assembles the base prompt from the unified prompt + situational instruction ---
+    llm_prompt_content = get_orchestrated_system_prompt() + system_instruction
+
+    # --- Summarization Check (Restored from legacy /chat — prevents context overflow) ---
+    summarized_context_str = ""
+    if len(chat_history) > config.CHAT_HISTORY_MAX_TURNS:
+        logger.info(f"Chat history long ({len(chat_history)} turns). Generating context summary.")
+        segment_to_summarize = chat_history[:-1]  # Everything except the latest user message
+        try:
+            summarized_segment_text = await execute_with_retry(
+                summarize_chat_history_segment,
+                llm_instance,
+                llm_generate_func,
+                segment_to_summarize,
+                max_tokens=config.DEFAULT_SUMMARIZE_MAX_TOKENS
+            )
+            summarized_context_str = f"System: Summary of previous conversation: {summarized_segment_text}\n"
+        except Exception as e:
+            logger.warning(f"Summarization failed: {e}. Using raw history as fallback.")
+
+    # --- CONTEXT ROUTING: Memory Injection ---
+    is_objective_analysis = "[ANALYSIS_TRIGGER]" in user_question or "SCAN_COMPLETE_SIGNAL" in user_question
+    if not is_incognito and not is_objective_analysis:
+        logger.info(f"Injecting long-term memory for user {user_id}")
+        user_memory_context = ""
+        # 1. Hard Rules (SQLite)
+        rules = db_utils.get_user_memory_rules(user_id)
+        if rules:
+            rule_texts = [f"[{r['rule_type'].upper()}] {r['content']}" for r in rules]
+            user_memory_context += f"\n--- FIRM USER RULES & GUARDRAILS ---\nThese rules MUST be followed:\n" + "\n".join(rule_texts) + "\n------------------------------------\n"
+        # 2. Semantic Facts (Pinecone)
+        from chatbot_modules.utils import retrieve_user_memory
+        semantic_memory = await run_in_threadpool(retrieve_user_memory, user_question, user_id)
+        if semantic_memory:
+            user_memory_context += semantic_memory
+        llm_prompt_content += user_memory_context
+    elif is_objective_analysis:
+        logger.info("Objective analysis requested. Bypassing Agentic Memory to ensure unbiased reporting.")
+
+    # --- RAG Routing ---
+    rag_context = ""
+    if current_parsed_report and is_report_specific_question_web(user_question, current_parsed_report):
+        logger.info(f"{LogColors.ROUTER}[QUERY ROUTER] Query triggers INTERNAL {str(current_report_type).upper()} RAG.{LogColors.RESET}")
+        embedding_model = get_embedding_model_instance()
+        pinecone_index = get_pinecone_index_instance()
+        if current_report_namespace and embedding_model and pinecone_index:
+            rag_context = await run_in_threadpool(retrieve_internal_rag_context, user_question, current_report_namespace, top_k=config.DEFAULT_RAG_TOP_K)
+        if rag_context:
+            llm_prompt_content += f"Here is some relevant information from the current report:\n{rag_context}\n\n"
+            llm_prompt_content += f"The user is asking a question related to the previously provided {str(current_report_type).upper()} document/report.\n"
+        else:
+            llm_prompt_content += "No specific relevant information found in the current report for this query. "
+    else:
+        # --- TIER 0: CVE/CWE Local Knowledge Base Lookup ---
+        from chatbot_modules.cve_knowledge_base import detect_cve_cwe_query
+        cve_match = await run_in_threadpool(detect_cve_cwe_query, user_question)
+        cve_resolved = False
+        if cve_match:
+            cve_context = await run_in_threadpool(cve_match["handler"], **cve_match["args"])
+            if cve_context and not cve_context.startswith("No local"):
+                logger.info(f"{LogColors.ROUTER}[CVE KB] Local CVE/CWE context retrieved for query.{LogColors.RESET}")
+                llm_prompt_content += f"\n\n--- CVE/CWE INTELLIGENCE (Local KB) ---\n{cve_context}\n---\n"
+                cve_resolved = True
+        # External RAG (fallback)
+        if not cve_resolved:
+            logger.info(f"{LogColors.ROUTER}[QUERY ROUTER] Query is general. Searching EXTERNAL KNOWLEDGE BASE.{LogColors.RESET}")
+            embedding_model = get_embedding_model_instance()
+            pinecone_index = get_pinecone_index_instance()
+            if embedding_model and pinecone_index:
+                rag_context = await run_in_threadpool(retrieve_rag_context, user_question, top_k=config.DEFAULT_RAG_TOP_K, namespace="owasp-cybersecurity-kb")
+                if rag_context:
+                    llm_prompt_content += f"Here is some relevant information from a cybersecurity knowledge base:\n{rag_context}\n\n"
+                else:
+                    llm_prompt_content += "No specific relevant information found in the knowledge base. "
+            else:
+                llm_prompt_content += "RAG components not loaded. Answering based on general knowledge.\n"
+
+    # --- HYBRID RAG: Inject Logical Topology Graph Context ---
+    if current_parsed_report and current_report_type != "generic_pdf":
+        graph_json = db_utils.get_session_graph(session_id)
+        if graph_json:
+            session_graph = graph_utils.deserialize_graph(graph_json)
+            graph_summary = graph_utils.generate_graph_summary(session_graph)
+            if graph_summary:
+                logger.info(f"{LogColors.HYBRID}[HYBRID RAG] Injected Topological Graph Context for session {session_id}{LogColors.RESET}")
+                llm_prompt_content += f"\n--- LOGICAL TOPOLOGY GRAPH (Hybrid RAG) ---\nThe following explains the relationships between identified host machines, ports, services, URLs, and vulnerabilities for this session. Use this to trace attack vectors and lateral movement logic.\n{graph_summary}\n-------------------------------------------\n"
+
+    # --- Build History String (with summarization awareness) ---
+    if summarized_context_str:
+        llm_prompt_content += summarized_context_str
+        # Only append the very last user message
+        if chat_history:
+            llm_prompt_content += f"User: {chat_history[-1]['content']}\n"
+    else:
+        for msg in chat_history:
+            role_label = msg["role"].capitalize()
+            if msg["role"] in ["assistant", "ai"]:
+                role_label = "Assistant"
+            elif msg["role"] in ["system", "system_hidden"]:
+                role_label = "System"
+            llm_prompt_content += f"{role_label}: {msg['content']}\n"
+
+    return llm_prompt_content
+
+
+# Deleted legacy @app.post("/chat") (was L1111-L1408).
+# Its unique logic (summarization, categorized prompts, local failover) has been
+# absorbed into get_orchestrated_system_prompt() and _build_chat_context() above.
+# Both /chat_stream and /chat (Unified) now use these shared helpers.
+
+
+
     # --- PHASE 1: DB Retrieval ---
     session_data = None
     # 1. Try fetching specific session by ID
@@ -1281,18 +1479,31 @@ async def chat(chat_message: ChatMessage):
         else:
             llm_prompt_content += "No specific relevant information found in the current report for this query. "
     else:
+        # --- TIER 0: CVE/CWE Local Knowledge Base Lookup ---
+        from chatbot_modules.cve_knowledge_base import detect_cve_cwe_query
+        cve_match = await run_in_threadpool(detect_cve_cwe_query, user_question)
+        cve_resolved = False
+        
+        if cve_match:
+            cve_context = await run_in_threadpool(cve_match["handler"], **cve_match["args"])
+            if cve_context and not cve_context.startswith("No local"):
+                logger.info(f"{LogColors.ROUTER}[CVE KB] Local CVE/CWE context retrieved for query.{LogColors.RESET}")
+                llm_prompt_content += f"\n\n--- CVE/CWE INTELLIGENCE (Local KB) ---\n{cve_context}\n---\n"
+                cve_resolved = True
+
         # External RAG
-        logger.info(f"{LogColors.ROUTER}[QUERY ROUTER] Query is general. Searching EXTERNAL KNOWLEDGE BASE.{LogColors.RESET}")
-        embedding_model = get_embedding_model_instance()
-        pinecone_index = get_pinecone_index_instance()
-        if embedding_model and pinecone_index:
-            rag_context = await run_in_threadpool(retrieve_rag_context, user_question, top_k=config.DEFAULT_RAG_TOP_K, namespace="owasp-cybersecurity-kb")
-            if rag_context:
-                llm_prompt_content += f"Here is some relevant information from a cybersecurity knowledge base:\n{rag_context}\n\n"
+        if not cve_resolved:
+            logger.info(f"{LogColors.ROUTER}[QUERY ROUTER] Query is general. Searching EXTERNAL KNOWLEDGE BASE.{LogColors.RESET}")
+            embedding_model = get_embedding_model_instance()
+            pinecone_index = get_pinecone_index_instance()
+            if embedding_model and pinecone_index:
+                rag_context = await run_in_threadpool(retrieve_rag_context, user_question, top_k=config.DEFAULT_RAG_TOP_K, namespace="owasp-cybersecurity-kb")
+                if rag_context:
+                    llm_prompt_content += f"Here is some relevant information from a cybersecurity knowledge base:\n{rag_context}\n\n"
+                else:
+                    llm_prompt_content += "No specific relevant information found in the knowledge base. "
             else:
-                llm_prompt_content += "No specific relevant information found in the knowledge base. "
-        else:
-            llm_prompt_content += "RAG components not loaded. Answering based on general knowledge.\n"
+                llm_prompt_content += "RAG components not loaded. Answering based on general knowledge.\n"
             
     # --- HYBRID RAG: Inject Logical Topology Graph Context ---
     if current_parsed_report and current_report_type != "generic_pdf":
@@ -1586,138 +1797,32 @@ async def chat_stream(
         attachment_json = json.dumps([{"url": a["url"], "name": a["name"], "type": "image"} for a in image_attachments]) if image_attachments else None
         db_utils.add_message(session_id, "user", user_question, attachments=attachment_json)
 
-    # --- 5. Build Context ---
-    current_parsed_report = session_data.get('parsed_report_data')
-    current_report_type = session_data.get('report_type')
-    current_report_namespace = session_data.get('pinecone_namespace')
-    current_status = session_data.get('status', 'ACTIVE')
+    # --- 5. Build Context & Prompt (Unified Logic) ---
+    llm_instance = _llm_instances_global.get(llm_mode)
+    llm_gen_func = _llm_generate_funcs_global.get(llm_mode)
+
+    if not llm_instance or not llm_gen_func:
+        raise HTTPException(status_code=503, detail=f"LLM mode '{llm_mode}' not initialized")
 
     # Fetch History
     chat_history_db = db_utils.get_chat_history(session_id, limit=config.CHAT_HISTORY_MAX_TURNS + 2)
     chat_history = [{"role": row['role'], "content": row['content']} for row in chat_history_db]
 
-    # System Instruction
-    system_instruction = ""
-    if verbosity == "concise":
-        system_instruction = "System: Provide a very brief, concise answer. Avoid fluff.\n"
-    elif verbosity == "detailed":
-        system_instruction = "System: Provide a detailed, technical deep-dive response.\n"
-
-    # --- Status-Specific Context ---
-    if current_status == "STATUS_WAITING_FOR_REPORT":
-        system_instruction += "System: A security scan is currently running. Inform the user you will analyze it once complete.\n"
-
-    # --- Active Report Injection ---
-    if current_parsed_report:
-        system_instruction += f"System: CURRENT ACTIVE REPORT: A {str(current_report_type).upper()} report is already loaded. Use it for your response.\n"
-
-    # --- ORCHESTRATOR SYSTEM PROMPT ---
-    orchestrator_prompt = (
-        "System: You are the NetShieldAI Security Orchestrator. Your goal is to guide the user through security audits and analyze technical telemetry.\n"
-        "1. Identify Intent: Look for scan requests (Nmap, ZAP, SSL, etc.).\n"
-        "2. Terminal Protocol: ONLY WHEN INITIATING an actual scan (triggering a tool), inform the user: 'Deploying module. You can monitor the live telemetry synchronization below. I will Lightspeed the data upon completion.' DO NOT say this when asking for input or settings.\n"
-        "3. Scan Options & Information Structure: When listing scans or providing details, use the following structure for each tool:\n"
-        "   - **Tool Name**\n"
-        "   - **Description**: Concise explanation of what the scan does.\n"
-        "   - **Target Requirements**: Precise target needed (e.g., IP, URL, Host).\n"
-        "   - **Configuration Options**: List of available parameters (e.g., Scan Type, Duration, Profile).\n"
-        "4. Tool Requirements Reference:\n"
-        "   - Nmap Scan: Requires 'target_ip'. Options: Protocol (TCP/UDP), Scan Type (default, os, aggressive, vuln, etc.), Timing (0-5).\n"
-        "   - ZAP Scan: Requires 'target_url'. Options: Scan Mode (Quick, Full, Deep), AJAX Spider (true/false).\n"
-        "   - SSL/TLS Scan: Requires 'target_host'.\n"
-        "   - SQL Injection Scan: Requires 'target_url'. Options: Scan Mode (quick, full, deep), Risk Level (1-3), Scan Level (1-5), Check WAF (true/false).\n"
-        "   - Packet Sniffer: Requires 'target_ip'. Options: Duration, Max Packets.\n"
-        "   - API Security Scan: Requires 'target_url' and 'definition_url' (Swagger). Options: Auth Token.\n"
-        "   - Kill Chain Audit: Requires 'target'. Options: Profile (Recon Only, Network Audit, Web Audit, Full Scan), Aggression (Normal, Stealth, Attack).\n"
-        "   - Semgrep SAST Scan: Requires 'git_url'.\n"
-        "5. MANDATORY: ALWAYS ask the user for the specific target and any required/optional configurations before initiating a scan. If the user only says 'run a scan', do NOT guess parameters. Explicitly list the requirements and configurations for the requested tool and wait for their reply before triggering the scan.\n"
-        "6. Formatting: Use separate paragraphs for your instructions and questions to the user. Do not clump information together.\n"
-        "7. Safety: Prohibit scanning 'localhost' or loopback addresses.\n"
-        "6. Synchronization: When you receive the trigger '[ANALYSIS_TRIGGER]', analyze the summary in 'SYSTEM_NOTIFICATION' and provide a professional breakdown.\n"
-        "7. Scheduling Missions: When the user wants to run a scan in the future or on a recurring basis, follow the **SCHEDULING PROTOCOL**:\n"
-        "   - **Acknowledge**: Inform the user you can orchestrate the persistence logic for their audit.\n"
-        "   - **Frequency Selection**: Output the tag `[MISSION_PRESETS]` followed by a bulleted list of options: One-Shot (Once), Daily, Weekly, Monthly, and Periodic. Format: `- Name: Description`.\n"
-        "   - **Structure**: Present tool options in a clear, structured list with bold headers.\n"
-        "   - **Tool Mapping**: Briefly list the 8 scanners available for scheduling (Nmap, ZAP, SSL, etc.).\n"
-        "   - **Trigger**: Only call `schedule_scan` once user provides Frequency, Time, Tool, and Target.\n"
-        "   - **Confirmation**: Inform them: 'Mission scheduled. I have orchestrated the persistence parameters for this audit.'\n"
-        "8. Scan Consultation: When the user wants to perform a scan or asks for scan help, follow the **SCAN PROTOCOL**:\n"
-        "   - **Acknowledge**: Acknowledge the request distinctly by outputting EXACTLY THIS marker on its own line: `[GRID_INTRO]`.\n"
-        "   - **Tool Selection**: Output exactly `[SCAN_PRESETS]` on a new line. Then, list all 8 scanners as a flat bulleted list (Nmap Scan, ZAP Scan, SSL/TLS Scan, SQL Injection Scan, Packet Sniffer, API Security Scan, Kill Chain Audit, Semgrep SAST Scan). Format: `- Tool Name: Description`.\n"
-        "   - **Consultation**: Below the card grid, provide a detailed textual reference with the header `### 🛡️ Tactical Scanner Configuration`. For each tool, use the following structured bullet-point format:\n"
-        "      - **Tool Name**\n"
-        "        - **Audit Scope**: Detailed technical purpose.\n"
-        "        - **Target Requirements**: Mandatory parameters.\n"
-        "        - **Operational Config**: Available modes, timings, and flags.\n"
-        "9. Smart Follow-ups: At the very end of your response in standard chat, proactively suggest exactly one logical next step. YOU MUST phrase this suggestion from the USER'S perspective (e.g. 'Analyze the Nmap results' instead of 'Should I analyze the results?'). Format: `__SUGGESTION__: <user actionable intent>`.\n"
-        "10. Memory Acknowledgment: If the user provides a permanent fact, rule, or preference in their message (e.g. 'Never scan 10.0.0.1'), you MUST first acknowledge it in a brief, professional sentence (e.g., 'I have noted that restriction for all future scans.'), and ONLY THEN output EXACTLY: `[MEMORY_UPDATED]` at the very end of your response.\n"
+    # Use the shared context builder (Single Source of Truth)
+    llm_prompt_content = await _build_chat_context(
+        user_question=user_question,
+        user_id=user_id,
+        session_id=session_id,
+        session_data=session_data,
+        verbosity=verbosity,
+        is_incognito=is_incognito,
+        llm_instance=llm_instance,
+        llm_generate_func=llm_gen_func,
+        chat_history=chat_history
     )
-    llm_prompt_content = orchestrator_prompt + system_instruction
-
-    # --- PHASE 3: CONTEXT ROUTING (MEMORY INJECTION) ---
-    is_objective_analysis = "[ANALYSIS_TRIGGER]" in user_question or "SCAN_COMPLETE_SIGNAL" in user_question
-    if not is_incognito and not is_objective_analysis:
-        logger.info(f"Injecting long-term memory for user {user_id}")
-        user_memory_context = ""
-        # 1. Hard Rules (SQLite)
-        rules = db_utils.get_user_memory_rules(user_id)
-        if rules:
-            rule_texts = [f"[{r['rule_type'].upper()}] {r['content']}" for r in rules]
-            user_memory_context += f"\n--- FIRM USER RULES & GUARDRAILS ---\nThese rules MUST be followed:\n" + "\n".join(rule_texts) + "\n------------------------------------\n"
-        
-        # 2. Semantic Facts (Pinecone)
-        from chatbot_modules.utils import retrieve_user_memory
-        semantic_memory = await run_in_threadpool(retrieve_user_memory, user_question, user_id)
-        if semantic_memory:
-            user_memory_context += semantic_memory
-            
-        llm_prompt_content += user_memory_context
-    elif is_objective_analysis:
-        logger.info("Objective analysis requested. Bypassing Agentic Memory to ensure unbiased reporting.")
-
-    # RAG Logic
-    rag_context = ""
-    if current_parsed_report and is_report_specific_question_web(user_question, current_parsed_report):
-        logger.info(f"{LogColors.ROUTER}[STREAM ROUTER] Query triggers INTERNAL {current_report_type.upper()} RAG.{LogColors.RESET}")
-        embedding_model = get_embedding_model_instance()
-        pinecone_index = get_pinecone_index_instance()
-        if current_report_namespace and embedding_model and pinecone_index:
-            rag_context = await run_in_threadpool(retrieve_internal_rag_context, user_question, current_report_namespace, top_k=config.DEFAULT_RAG_TOP_K)
-        if rag_context:
-            llm_prompt_content += f"Here is some relevant information from the current report:\n{rag_context}\n\n"
-            llm_prompt_content += f"The user is asking a question related to the previously provided {str(current_report_type).upper()} document/report.\n"
-    else:
-        # External RAG
-        logger.info(f"{LogColors.ROUTER}[STREAM ROUTER] Query is general. Searching EXTERNAL KNOWLEDGE BASE.{LogColors.RESET}")
-        embedding_model = get_embedding_model_instance()
-        pinecone_index = get_pinecone_index_instance()
-        if embedding_model and pinecone_index:
-            rag_context = await run_in_threadpool(retrieve_rag_context, user_question, top_k=config.DEFAULT_RAG_TOP_K, namespace="owasp-cybersecurity-kb")
-            if rag_context:
-                llm_prompt_content += f"Here is some relevant information from a cybersecurity knowledge base:\n{rag_context}\n\n"
-            
-    # --- HYBRID RAG: Inject Logical Topology Graph Context (Stream) ---
-    if current_parsed_report and current_report_type != "generic_pdf":
-        graph_json = db_utils.get_session_graph(session_id)
-        if graph_json:
-            session_graph = graph_utils.deserialize_graph(graph_json)
-            graph_summary = graph_utils.generate_graph_summary(session_graph)
-            if graph_summary:
-                logger.info(f"{LogColors.HYBRID}[HYBRID RAG] Injected Topological Graph Context for session {session_id}{LogColors.RESET}")
-                llm_prompt_content += f"\n--- LOGICAL TOPOLOGY GRAPH (Hybrid RAG) ---\nThe following explains the relationships between identified host machines, ports, services, URLs, and vulnerabilities for this session. Use this to trace attack vectors and lateral movement logic.\n{graph_summary}\n-------------------------------------------\n"
-    # Build History String
-    concatenated_history = ""
-    for msg in chat_history:
-        role_label = msg['role'].capitalize()
-        if msg['role'] == 'system_hidden':
-            role_label = 'System'
-        elif msg['role'] in ['assistant', 'ai']:
-            role_label = 'Assistant'
-        concatenated_history += f"{role_label}: {msg['content']}\n"
     
-    # --- 6. Generation with Failover ---
-    # We use augmented_question for the latest turn
-    final_prompt = f"{llm_prompt_content}\n{concatenated_history}User: {augmented_question}\nAssistant:"
+    # Final Prompt Assembly
+    final_prompt = f"{llm_prompt_content}Assistant:"
     
     requested_mode = llm_mode
     if requested_mode in config.LLM_FAILOVER_PRIORITY:
@@ -1869,19 +1974,32 @@ async def chat(
         attachment_json = json.dumps([{"url": a["url"], "name": a["name"], "type": "image"} for a in image_attachments]) if image_attachments else None
         db_utils.add_message(session_id, "user", user_question, attachments=attachment_json)
 
-    # 4. Build Context
-    chat_history_db = db_utils.get_chat_history(session_id, limit=config.CHAT_HISTORY_MAX_TURNS)
-    chat_history = [{"role": row['role'], "content": row['content']} for row in chat_history_db[:-1]]
+    # --- 4. Build Context & Prompt (Unified Logic) ---
+    llm_instance = _llm_instances_global.get(llm_mode)
+    llm_gen_func = _llm_generate_funcs_global.get(llm_mode)
+
+    if not llm_instance or not llm_gen_func:
+        raise HTTPException(status_code=503, detail=f"LLM mode '{llm_mode}' not initialized")
+
+    # Fetch History
+    chat_history_db = db_utils.get_chat_history(session_id, limit=config.CHAT_HISTORY_MAX_TURNS + 2)
+    chat_history = [{"role": row['role'], "content": row['content']} for row in chat_history_db]
+
+    # Use the shared context builder (Single Source of Truth)
+    llm_prompt_content = await _build_chat_context(
+        user_question=user_question,
+        user_id=user_id,
+        session_id=session_id,
+        session_data=session_data,
+        verbosity=verbosity,
+        is_incognito=is_incognito,
+        llm_instance=llm_instance,
+        llm_generate_func=llm_gen_func,
+        chat_history=chat_history
+    )
     
-    # Static Prompt Context
-    system_ctx = f"System: NetShieldAI Orchestrator.\n{orchestrator_prompt}\n"
-    if verbosity == "concise":
-        system_ctx += "System: Provide a concise answer.\n"
-    
-    final_prompt = system_ctx
-    for m in chat_history:
-        final_prompt += f"{m['role'].capitalize()}: {m['content']}\n"
-    final_prompt += f"User: {augmented_question}\nAssistant:"
+    # Final Prompt Assembly
+    final_prompt = f"{llm_prompt_content}Assistant:"
 
     # 5. Generation
     used_mode = llm_mode

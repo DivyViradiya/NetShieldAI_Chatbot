@@ -30,6 +30,15 @@ def load_model(api_key: str = None, model_name: str = "gemini-2.0-flash", tools:
         logger.error(f"Failed to load Gemini model: {e}")
         raise e
 
+def _proto_to_dict(obj):
+    """Recursively converts protobuf MapComposite/RepeatedComposite to native Python dict/list."""
+    if hasattr(obj, 'items'):
+        return {k: _proto_to_dict(v) for k, v in obj.items()}
+    elif hasattr(obj, '__iter__') and not isinstance(obj, str):
+        return [_proto_to_dict(item) for item in obj]
+    else:
+        return obj
+
 async def generate_response(model, prompt: str, max_tokens: int = 8192, attachments: list = None) -> dict:
     """
     Standard Async Generation. 
@@ -63,7 +72,7 @@ async def generate_response(model, prompt: str, max_tokens: int = 8192, attachme
                     # CANONICAL SCHEMA: {"tool": str, "parameters": dict, "monitor_mode": "terminal"}
                     tool_call = {
                         "tool": part.function_call.name,
-                        "parameters": dict(part.function_call.args),
+                        "parameters": _proto_to_dict(part.function_call.args),
                         "monitor_mode": "terminal"
                     }
                 if part.text:
@@ -103,7 +112,8 @@ async def generate_response_stream(model, prompt: str, max_tokens: int = 8192, a
                 for part in chunk.candidates[0].content.parts:
                     if part.function_call:
                         # We yield a special JSON string for the tool call
-                        yield f"__TOOL_CALL__:{part.function_call.name}:{json.dumps(dict(part.function_call.args))}"
+                        args_dict = _proto_to_dict(part.function_call.args)
+                        yield f"__TOOL_CALL__:{part.function_call.name}:{json.dumps(args_dict)}"
                     elif part.text:
                         yield part.text
                 

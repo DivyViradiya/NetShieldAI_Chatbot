@@ -168,6 +168,17 @@ SECURITY_TOOLS = [
                     },
                     "required": ["tool_name", "target", "schedule_type"]
                 }
+            },
+            {
+                "name": "lookup_cve_cwe",
+                "description": "Perform an internal intelligence lookup for a specific CVE or CWE ID.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                         "id_string": {"type": "string", "description": "The exact CVE ID (e.g. 'CVE-2024-0001') or CWE ID (e.g. 'CWE-79')."}
+                    },
+                    "required": ["id_string"]
+                }
             }
         ]
     }
