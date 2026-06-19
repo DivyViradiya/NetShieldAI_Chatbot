@@ -26,7 +26,7 @@ try:
          
     model = gemini_llm.load_model(
         api_key=api_key,
-        model_name="gemini-2.0-flash",
+        model_name="gemini-2.5-flash",
         tools=SECURITY_TOOLS
     )
     print("\n[SUCCESS] Model loaded with tools! Schema parsed correctly.")
