@@ -8,6 +8,7 @@ langchain
 fastapi
 huggingface_hub
 python-multipart
-llama_cpp
+llama-cpp-python
 slowapi>=0.1.9
 apscheduler
+google-genai

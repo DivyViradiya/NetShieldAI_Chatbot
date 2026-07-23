@@ -82,7 +82,7 @@ def initialize_pinecone_index() -> Any: # Returns a pinecone.Index object
                 "Pinecone API Key or Environment not set."
             )
         try:
-            pc = Pinecone(api_key=PINECONE_API_KEY, environment=PINECONE_ENVIRONMENT)
+            pc = Pinecone(api_key=PINECONE_API_KEY)
             
             # Check if index exists, if not, create it
             existing_indexes = [index_info.name for index_info in pc.list_indexes()]

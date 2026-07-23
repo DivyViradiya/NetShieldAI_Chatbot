@@ -1,5 +1,6 @@
 import os
 import sys
+os.environ["HF_HUB_VERBOSITY"] = "error"
 import json
 import logging
 import uuid
@@ -78,6 +79,7 @@ class LogColors:
 # Initialize logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
+logging.getLogger('huggingface_hub').setLevel(logging.ERROR)
 
 # Configuration for file uploads
 UPLOAD_FOLDER = os.path.join(current_dir, 'uploads')
@@ -153,9 +155,13 @@ class DeleteSessionRequest(BaseModel):
 async def execute_with_retry(func, *args, **kwargs):
     """
     Executes an async function with automatic retry logic for Gemini 429 errors.
-    Supports both standard exceptions and Google API specific ResourceExhausted.
+    Supports both standard exceptions, google-genai APIError, and Google API specific ResourceExhausted.
     """
     from google.api_core import exceptions as google_exceptions
+    try:
+        from google.genai import errors as genai_errors
+    except ImportError:
+        genai_errors = None
     
     max_retries = 4
     base_delay = 15 # Start with 15s delay for 429s on free tier
@@ -163,9 +169,10 @@ async def execute_with_retry(func, *args, **kwargs):
     for attempt in range(max_retries):
         try:
             return await func(*args, **kwargs)
-        except (google_exceptions.ResourceExhausted, Exception) as e:
+        except Exception as e:
             error_str = str(e).lower()
             is_quota_error = isinstance(e, google_exceptions.ResourceExhausted) or \
+                             (genai_errors is not None and isinstance(e, genai_errors.APIError) and e.code == 429) or \
                              any(hit in error_str for hit in ["429", "quota", "exhausted", "rate limit"])
             
             if is_quota_error:
@@ -334,6 +341,28 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+@app.middleware("http")
+async def add_security_headers(request: Request, call_next):
+    """Applies strict security headers including Content Security Policy (CSP) and Clickjacking defense."""
+    response = await call_next(request)
+    response.headers["Content-Security-Policy"] = (
+        "default-src 'self'; "
+        "script-src 'self' 'unsafe-inline' 'unsafe-eval' https://cdn.tailwindcss.com https://cdn.jsdelivr.net https://cdnjs.cloudflare.com; "
+        "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com https://cdn.jsdelivr.net https://cdnjs.cloudflare.com; "
+        "font-src 'self' data: https://fonts.gstatic.com https://fonts.googleapis.com; "
+        "img-src 'self' data: blob: https:; "
+        "connect-src 'self' ws: wss: http: https:; "
+        "frame-ancestors 'none'; "
+        "object-src 'none'; "
+        "base-uri 'self'; "
+        "form-action 'self';"
+    )
+    response.headers["X-Frame-Options"] = "DENY"
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    response.headers["X-XSS-Protection"] = "1; mode=block"
+    response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
+    return response
 
 # Mounting static files
 app.mount("/chatbot_uploads", StaticFiles(directory=UPLOAD_FOLDER), name="chatbot_uploads")
