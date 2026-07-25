@@ -980,8 +980,8 @@ def load_report_chunks_and_embeddings(parsed_report_data: Dict[str, Any], report
 
     for i, chunk_data in enumerate(raw_chunks_with_metadata):
         chunk_text = chunk_data["text"]
-        # Generate embedding (removed .tolist() as convert_to_numpy=False returns list)
-        chunk_embedding = embedding_model.encode(chunk_text, convert_to_numpy=False) # Fix: removed .tolist()
+        # Generate embedding and convert it to a standard Python list of floats
+        chunk_embedding = embedding_model.encode(chunk_text).tolist()
         
         # Create a unique ID for each vector within the namespace
         vector_id = f"{chunk_data.get('id_suffix', f'chunk-{i}')}"
