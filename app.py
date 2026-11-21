@@ -1899,7 +1899,7 @@ async def chat_stream(
 
             try:
                 if mode != requested_mode:
-                    yield f"[System: Model {requested_mode} unavailable. Switched to {mode} failsafe.]\n\n"
+                    yield f"[System: Notice — '{requested_mode}' is temporarily experiencing high demand. Switched to '{mode}' failsafe.]\n\n"
 
                 if mode == "local":
                     gen_func = _llm_generate_funcs_global.get(mode)
@@ -1940,9 +1940,11 @@ async def chat_stream(
                 used_mode = mode
                 break
             except Exception as e:
-                logger.error(f"Streaming failed for {mode}: {e}")
+                logger.warning(f"{LogColors.AGENT}[AGENT] Streaming failover triggered: {mode} failed with error: {e}{LogColors.RESET}")
+                full_response_accumulator = ""
+                action_found = None
                 if mode == failover_sequence[-1]:
-                    yield f"\n[Critical Error: All models failed. {str(e)}]"
+                    yield f"\n[Critical Error: All models in failover sequence failed. {str(e)}]"
                 continue
 
         # --- Post-Stream Persistence ---
@@ -2063,7 +2065,7 @@ async def chat(
     # 5. Generation
     used_mode = llm_mode
     llm_result = None
-    failover_sequence = [llm_mode] + [m for m in config.SUPPORTED_LLM_MODES if m != llm_mode]
+    failover_sequence = [llm_mode] + [m for m in config.LLM_FAILOVER_PRIORITY if m != llm_mode]
     
     for mode in failover_sequence:
         instance = _llm_instances_global.get(mode)

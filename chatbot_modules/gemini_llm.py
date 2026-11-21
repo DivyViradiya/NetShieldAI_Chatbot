@@ -22,7 +22,7 @@ class GeminiModelWrapper:
         self.model_name = model_name
         self.tools = tools
 
-def load_model(api_key: str = None, model_name: str = "gemini-3.8-flash", tools: list = None, **kwargs):
+def load_model(api_key: str = None, model_name: str = "gemini-2.5-flash", tools: list = None, **kwargs):
     """Loads and configures the Gemini model with optional tools."""
     key_to_use = api_key or kwargs.get('api_key') or os.environ.get("GEMINI_API_KEY")
     if not key_to_use:
@@ -163,5 +163,9 @@ async def generate_response_stream(model: GeminiModelWrapper, prompt: str, max_t
                         pass
                 
     except Exception as e:
-        logger.error(f"Error in Gemini streaming: {str(e)}")
-        yield f"\n[System Error: {str(e)}]"
+        err_msg = str(e)
+        if any(code in err_msg for code in ["503", "429", "UNAVAILABLE", "ResourceExhausted", "high demand", "RESOURCE_EXHAUSTED"]):
+            logger.warning(f"Transient Gemini streaming API issue ({model.model_name}): {err_msg}")
+        else:
+            logger.error(f"Error in Gemini streaming ({model.model_name}): {err_msg}")
+        raise e
