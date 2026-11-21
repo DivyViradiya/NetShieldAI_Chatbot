@@ -151,11 +151,12 @@ class PinRequest(BaseModel):
 class DeleteSessionRequest(BaseModel):
     session_id: str
 
-# --- NEW HELPER: Retry Logic for API Quotas ---
+# --- NEW HELPER: Retry Logic for API Quotas & Transient 503 Capacity Spikes ---
 async def execute_with_retry(func, *args, **kwargs):
     """
-    Executes an async function with automatic retry logic for Gemini 429 errors.
-    Supports both standard exceptions, google-genai APIError, and Google API specific ResourceExhausted.
+    Executes an async function with automatic retry logic for Gemini 429 (quota/rate limits)
+    and 503/502/504 (transient high demand / capacity spikes).
+    Supports google-genai APIError and Google API specific ResourceExhausted/ServiceUnavailable.
     """
     from google.api_core import exceptions as google_exceptions
     try:
@@ -163,28 +164,40 @@ async def execute_with_retry(func, *args, **kwargs):
     except ImportError:
         genai_errors = None
     
-    max_retries = 4
-    base_delay = 15 # Start with 15s delay for 429s on free tier
+    max_retries = 3
     
     for attempt in range(max_retries):
         try:
             return await func(*args, **kwargs)
         except Exception as e:
             error_str = str(e).lower()
+            
             is_quota_error = isinstance(e, google_exceptions.ResourceExhausted) or \
                              (genai_errors is not None and isinstance(e, genai_errors.APIError) and e.code == 429) or \
                              any(hit in error_str for hit in ["429", "quota", "exhausted", "rate limit"])
             
-            if is_quota_error:
+            is_demand_error = isinstance(e, google_exceptions.ServiceUnavailable) or \
+                              (genai_errors is not None and isinstance(e, genai_errors.APIError) and e.code in (503, 502, 504)) or \
+                              any(hit in error_str for hit in ["503", "502", "504", "unavailable", "high demand", "try again later", "overloaded"])
+            
+            if is_quota_error or is_demand_error:
                 if attempt < max_retries - 1:
-                    wait_time = base_delay * (2 ** attempt) # Exponential backoff: 15, 30, 60, 120
-                    logger.warning(f"{LogColors.AGENT}[RETRY] Gemini Quota hit. Waiting {wait_time}s before attempt {attempt + 2}/{max_retries}...{LogColors.RESET}")
+                    # Shorter backoff for 503 capacity spikes (2s, 4s); longer for 429 quota exhaustion (10s, 20s)
+                    wait_time = (2 * (2 ** attempt)) if is_demand_error else (10 * (2 ** attempt))
+                    error_type = "High Demand / 503" if is_demand_error else "Quota / 429"
+                    logger.warning(
+                        f"{LogColors.AGENT}[RETRY] Gemini {error_type} encountered. "
+                        f"Retrying in {wait_time}s (attempt {attempt + 2}/{max_retries})...{LogColors.RESET}"
+                    )
                     await asyncio.sleep(wait_time)
                 else:
-                    logger.error(f"{LogColors.EXTERNAL}[FATAL] Max retries reached for Gemini API. Quota is fully exhausted.{LogColors.RESET}")
+                    logger.warning(
+                        f"{LogColors.EXTERNAL}[FALLTHROUGH] Max retries reached for Gemini API ({error_str[:120]}). "
+                        f"Passing to next model in failover sequence...{LogColors.RESET}"
+                    )
                     raise e
             else:
-                # Not a quota error, re-raise immediately
+                # Non-transient error -> re-raise immediately
                 raise e
 
 

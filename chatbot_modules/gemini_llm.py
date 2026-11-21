@@ -107,7 +107,11 @@ async def generate_response(model: GeminiModelWrapper, prompt: str, max_tokens: 
             "tool_call": tool_call
         }
     except Exception as e:
-        logger.error(f"Error in Gemini generate_response: {str(e)}")
+        err_msg = str(e)
+        if any(code in err_msg for code in ["503", "429", "UNAVAILABLE", "ResourceExhausted", "high demand"]):
+            logger.warning(f"Transient Gemini API issue ({model.model_name}): {err_msg}")
+        else:
+            logger.error(f"Error in Gemini generate_response ({model.model_name}): {err_msg}")
         raise e
 
 # --- NEW STREAMING FUNCTION ---
