@@ -4,7 +4,7 @@ import logging
 from pathlib import Path
 
 # Add project root to sys.path
-PROJECT_ROOT = Path(r"d:\NetShield\NetShieldAI_Chatbot")
+PROJECT_ROOT = Path(__file__).resolve().parent
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
@@ -26,7 +26,7 @@ try:
          
     model = gemini_llm.load_model(
         api_key=api_key,
-        model_name="gemini-2.5-flash",
+        model_name="gemini-3.8-flash",
         tools=SECURITY_TOOLS
     )
     print("\n[SUCCESS] Model loaded with tools! Schema parsed correctly.")

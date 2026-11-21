@@ -17,25 +17,21 @@ class LogColors:
 # Define the base directory for the project.
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
-DEFAULT_LLM_MODE = "gemini-2.5-flash"
+DEFAULT_LLM_MODE = "gemini-3.8-flash"
 SUPPORTED_LLM_MODES = [
-    "gemini-2.5-flash",
-    "gemini-2.5-pro", 
-    "gemini-3-flash-preview", 
-    "gemini-3-pro-preview", 
-    "gemini-3.1-flash-lite-preview", 
-    "gemini-3.1-pro-preview", 
+    "gemini-4-hydrogen",
+    "gemini-4-carbon",
+    "gemini-4-argon",
+    "gemini-3.8-flash",
+    "gemini-3.5-flash",
     "local"
 ]
 
 # Failover Priority List (Order of attempt if one fails)
 LLM_FAILOVER_PRIORITY = [
-    "gemini-2.5-flash",
-    "gemini-2.5-pro",
-    "gemini-3-flash-preview",
-    "gemini-3-pro-preview",
-    "gemini-3.1-flash-lite-preview",
-    "gemini-3.1-pro-preview",
+    "gemini-3.8-flash",
+    "gemini-4-hydrogen",
+    "gemini-3.5-flash",
     "local"
 ]
 

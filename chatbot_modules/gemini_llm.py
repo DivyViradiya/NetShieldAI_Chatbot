@@ -22,7 +22,7 @@ class GeminiModelWrapper:
         self.model_name = model_name
         self.tools = tools
 
-def load_model(api_key: str = None, model_name: str = "gemini-2.5-flash", tools: list = None, **kwargs):
+def load_model(api_key: str = None, model_name: str = "gemini-3.8-flash", tools: list = None, **kwargs):
     """Loads and configures the Gemini model with optional tools."""
     key_to_use = api_key or kwargs.get('api_key') or os.environ.get("GEMINI_API_KEY")
     if not key_to_use:
@@ -60,10 +60,15 @@ async def generate_response(model: GeminiModelWrapper, prompt: str, max_tokens: 
                     "data": att["data"]
                 })
         
-        config = types.GenerateContentConfig(
-            max_output_tokens=max_tokens,
-            temperature=0.7,
-        )
+        config_kwargs = {
+            "max_output_tokens": max_tokens,
+            "temperature": 0.7,
+        }
+        # Enable chain-of-thought thinking budget for Gemini 4 reasoning models if supported
+        if "gemini-4" in getattr(model, "model_name", "") and hasattr(types, "ThinkingConfig"):
+            config_kwargs["thinking_config"] = types.ThinkingConfig(thinking_budget=2048)
+
+        config = types.GenerateContentConfig(**config_kwargs)
         if model.tools:
             config.tools = model.tools
 
@@ -121,10 +126,15 @@ async def generate_response_stream(model: GeminiModelWrapper, prompt: str, max_t
                     "data": att["data"]
                 })
         
-        config = types.GenerateContentConfig(
-            max_output_tokens=max_tokens,
-            temperature=0.7,
-        )
+        config_kwargs = {
+            "max_output_tokens": max_tokens,
+            "temperature": 0.7,
+        }
+        # Enable chain-of-thought thinking budget for Gemini 4 reasoning models if supported
+        if "gemini-4" in getattr(model, "model_name", "") and hasattr(types, "ThinkingConfig"):
+            config_kwargs["thinking_config"] = types.ThinkingConfig(thinking_budget=2048)
+
+        config = types.GenerateContentConfig(**config_kwargs)
         if model.tools:
             config.tools = model.tools
 
