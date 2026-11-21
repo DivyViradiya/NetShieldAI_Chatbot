@@ -297,6 +297,18 @@ async def lifespan(app: FastAPI):
     
     _init_global_llm_and_rag()
     
+    # --- PHASE 1.5: BACKGROUND PRE-WARM CVE KNOWLEDGE BASE ---
+    async def prewarm_cve_kb():
+        try:
+            logger.info(f"{LogColors.INIT}[INIT] Pre-warming CVE Knowledge Base in background...{LogColors.RESET}")
+            from chatbot_modules.cve_knowledge_base import _init_kb_if_needed
+            await run_in_threadpool(_init_kb_if_needed)
+            logger.info(f"{LogColors.SUCCESS}[SUCCESS] CVE Knowledge Base pre-warmed.{LogColors.RESET}")
+        except Exception as e:
+            logger.warning(f"CVE Knowledge Base pre-warm notice: {e}")
+
+    asyncio.create_task(prewarm_cve_kb())
+    
     # --- PHASE 2: AUTO-CLEANUP SCHEDULER ---
     async def cleanup_stale_sessions():
         logger.info(f"{LogColors.ROUTER}[SCHEDULER] Running Pinecone TTL Garbage Collection...{LogColors.RESET}")
@@ -1943,7 +1955,12 @@ async def chat_stream(
                  content_to_save += f"\n__METADATA_ACTION__:{json.dumps(action_found)}"
             db_utils.add_message(session_id, "assistant", content_to_save)
 
-    headers = {"X-Session-ID": session_id}
+    headers = {
+        "X-Session-ID": session_id,
+        "X-Accel-Buffering": "no",
+        "Cache-Control": "no-cache, no-transform",
+        "Connection": "keep-alive"
+    }
     return StreamingResponse(response_generator(), media_type="text/plain", headers=headers, background=background_tasks)
 
 # --- Unified Chat Endpoint ---
